@@ -1,0 +1,83 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Alula",
+        "description": "Sign in with your Alula account to control your alarm panel.",
+        "data": {
+          "username": "Email",
+          "password": "Password",
+          "panel_id": "Panel ID"
+        },
+        "data_description": {
+          "username": "The email address you use to sign in to the Alula app.",
+          "password": "Your Alula account password.",
+          "panel_id": "Optional. Only needed if your account has multiple panels. You can find this in the Alula app under device settings."
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Invalid email or password. Please check your credentials.",
+      "cannot_connect": "Could not connect to the Alula API. Please check your internet connection.",
+      "unknown": "An unexpected error occurred. Check the Home Assistant logs for details."
+    },
+    "abort": {
+      "already_configured": "This Alula account is already configured."
+    }
+  },
+  "services": {
+    "force_arm": {
+      "name": "Force arm",
+      "description": "Arm when zones are open, without a PIN. The default bypasses open zones, then arms. Native sends the panel forceArm command. Smoke and CO zones are not auto-bypassed.",
+      "fields": {
+        "entity_id": {
+          "name": "Alarm panel",
+          "description": "Alula alarm panel to arm. Optional when only one panel is configured."
+        },
+        "mode": {
+          "name": "Mode",
+          "description": "Arming mode.",
+          "selector": {
+            "select": {
+              "options": {
+                "home": "Home",
+                "away": "Away",
+                "night": "Night"
+              }
+            }
+          }
+        },
+        "method": {
+          "name": "Method",
+          "description": "bypass writes zoneBypass for each open zone, then arms. native writes forceArm.",
+          "selector": {
+            "select": {
+              "options": {
+                "bypass": "Bypass open zones",
+                "native": "Native force arm"
+              }
+            }
+          }
+        }
+      }
+    },
+    "bypass_zone": {
+      "name": "Bypass zone",
+      "description": "Bypass or restore one zone, without a PIN. Pass the zone sensor, or a 0-based Alula zone index.",
+      "fields": {
+        "entity_id": {
+          "name": "Zone or panel",
+          "description": "Zone binary sensor, or the alarm panel when a zone index is also given."
+        },
+        "zone": {
+          "name": "Zone index",
+          "description": "0-based Alula zone index, the same number as in the unique id alula_zone_<index>."
+        },
+        "bypass": {
+          "name": "Bypass",
+          "description": "Turn bypass on, or off to restore the zone."
+        }
+      }
+    }
+  }
+}

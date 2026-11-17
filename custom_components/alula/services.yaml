@@ -1,0 +1,87 @@
+force_arm:
+  name: Force arm
+  description: >
+    Arm the panel when doors or windows are open, without a PIN. The default
+    method bypasses the currently open zones, then arms with the normal no-PIN
+    arm command. Native sends the panel forceArm command instead. Smoke and CO
+    zones are not auto-bypassed. The zone index used by bypass is the 0-based
+    Alula index.
+  fields:
+    entity_id:
+      name: Alarm panel
+      description: >
+        Alula alarm panel to arm. Optional when only one panel is configured.
+      required: false
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - integration: alula
+              domain: alarm_control_panel
+    mode:
+      name: Mode
+      description: Arming mode.
+      required: true
+      example: home
+      default: home
+      selector:
+        select:
+          options:
+            - home
+            - away
+            - night
+    method:
+      name: Method
+      description: >
+        bypass writes zoneBypass for each open zone, then arms. native writes
+        forceArm. bypass is the default.
+      required: false
+      default: bypass
+      example: bypass
+      selector:
+        select:
+          options:
+            - bypass
+            - native
+
+bypass_zone:
+  name: Bypass zone
+  description: >
+    Bypass or restore one zone, without a PIN. Pass the zone's binary sensor,
+    or the alarm panel plus the 0-based Alula zone index (the number in the
+    sensor unique id alula_zone_<index>).
+  fields:
+    entity_id:
+      name: Zone or panel
+      description: >
+        Zone binary sensor, or the alarm panel when a zone index is also given.
+        Optional when a zone index is given and only one panel is configured.
+      required: false
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - integration: alula
+              domain: binary_sensor
+            - integration: alula
+              domain: alarm_control_panel
+    zone:
+      name: Zone index
+      description: >
+        0-based Alula zone index. This is the same number as in the zone
+        entity unique id alula_zone_<index>, not the keypad's 1-based zone
+        number. Required when entity_id is the alarm panel or is omitted.
+      required: false
+      example: 4
+      selector:
+        number:
+          min: 0
+          max: 255
+          mode: box
+    bypass:
+      name: Bypass
+      description: Turn bypass on, or off to restore the zone.
+      required: false
+      default: true
+      selector:
+        boolean:

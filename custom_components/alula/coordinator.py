@@ -9,23 +9,19 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import DEFAULT_SCAN_INTERVAL, DOMAIN
-
-try:
-    from pyalula import AlulaClient, AlarmPanel
-    from pyalula.client import AlulaAuthError, AlulaApiError
-except ImportError:
-    pass
+from .pyalula import AlarmPanel, AlulaClient
+from .pyalula.client import AlulaApiError, AlulaAuthError
 
 _LOGGER = logging.getLogger(__name__)
 
 
-class AlulaCoordinator(DataUpdateCoordinator["AlarmPanel"]):
+class AlulaCoordinator(DataUpdateCoordinator[AlarmPanel]):
     """Polls the Alula REST API and refreshes zone state via WebSocket."""
 
     def __init__(
         self,
         hass: HomeAssistant,
-        client: "AlulaClient",
+        client: AlulaClient,
         panel_id: str | None = None,
         scan_interval: int = DEFAULT_SCAN_INTERVAL,
     ) -> None:
@@ -43,7 +39,7 @@ class AlulaCoordinator(DataUpdateCoordinator["AlarmPanel"]):
         """Called by the client when a keypad push indicates an arm state transition."""
         self.hass.async_create_task(self.async_request_refresh())
 
-    async def _async_update_data(self) -> "AlarmPanel":
+    async def _async_update_data(self) -> AlarmPanel:
         """Fetch fresh panel + zone data."""
         try:
             # Poll arm state via REST (also caches panel ID needed for WS)

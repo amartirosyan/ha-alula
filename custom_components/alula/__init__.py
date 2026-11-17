@@ -11,17 +11,9 @@ from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 
 from .const import CONF_PANEL_ID, DATA_CLIENT, DATA_COORDINATOR, DOMAIN
 from .coordinator import AlulaCoordinator
-
-# Import pyalula from the sibling directory during development.
-# In a published integration this would be a PyPI package.
-try:
-    from pyalula import AlulaClient
-    from pyalula.client import AlulaAuthError, AlulaApiError
-except ImportError as exc:
-    raise ImportError(
-        "pyalula library not found. Add the pyalula/ directory to PYTHONPATH "
-        "or install it with: pip install -e /path/to/ha-alula"
-    ) from exc
+from .pyalula import AlulaClient
+from .pyalula.client import AlulaApiError, AlulaAuthError
+from .services import async_setup_services, async_unload_services
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -53,6 +45,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     }
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    async_setup_services(hass)
     return True
 
 
@@ -62,4 +55,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if unload_ok:
         data = hass.data[DOMAIN].pop(entry.entry_id)
         await data[DATA_CLIENT].close()
+        if not hass.data[DOMAIN]:
+            async_unload_services(hass)
     return unload_ok

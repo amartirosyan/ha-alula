@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyalula"
-version = "0.1.1"
+version = "0.2.0"
 description = "Python client library for the Alula alarm panel API"
 readme = "README.md"
 license = "MIT"
@@ -27,3 +27,15 @@ include = ["pyalula*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+# BLE001/S110/PYI034/PYI036 match the existing socket client (broad excepts
+# around the receive loop, context-manager annotations). New force-arm code
+# still raises TypeError for a bad zone index.
+ignore = ["BLE001", "S110", "PYI034", "PYI036"]
