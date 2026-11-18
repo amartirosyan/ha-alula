@@ -28,7 +28,7 @@
   "services": {
     "force_arm": {
       "name": "Force arm",
-      "description": "Arm when zones are open, without a PIN. The default bypasses open zones, then arms. Native sends the panel forceArm command. Smoke and CO zones are not auto-bypassed.",
+      "description": "Arm when zones are open, without a PIN. The default is native forceArm. On a Concord 4, bypass leaves the panel disarmed and the keypad on the indirect-bypass prompt. Home Assistant state can lag the keypad by 30-90 seconds.",
       "fields": {
         "entity_id": {
           "name": "Alarm panel",
@@ -49,12 +49,12 @@
         },
         "method": {
           "name": "Method",
-          "description": "bypass writes zoneBypass for each open zone, then arms. native writes forceArm.",
+          "description": "native (default) writes forceArm. bypass writes zoneBypass and then arms; that does not work on a Concord 4.",
           "selector": {
             "select": {
               "options": {
-                "bypass": "Bypass open zones",
-                "native": "Native force arm"
+                "native": "Native force arm",
+                "bypass": "Bypass open zones (does not work on Concord 4)"
               }
             }
           }

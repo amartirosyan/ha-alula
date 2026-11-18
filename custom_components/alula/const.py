@@ -20,4 +20,4 @@ ATTR_BYPASS = "bypass"
 
 FORCE_ARM_MODES = ("home", "away", "night")
 FORCE_ARM_METHODS = ("bypass", "native")
-DEFAULT_FORCE_ARM_METHOD = "bypass"
+DEFAULT_FORCE_ARM_METHOD = "native"

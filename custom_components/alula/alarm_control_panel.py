@@ -97,19 +97,25 @@ class AlulaAlarmPanel(CoordinatorEntity[AlulaCoordinator], AlarmControlPanelEnti
         await self.coordinator.async_request_refresh()
 
     async def async_alarm_arm_away(self, code: str | None = None) -> None:
-        await self._client.arm("away")
+        """Arm away with native forceArm. The code is not used or stored."""
+        del code
+        await self._client.force_arm("away")
         await self.coordinator.async_request_refresh()
 
     async def async_alarm_arm_home(self, code: str | None = None) -> None:
-        await self._client.arm("stay")
+        """Arm home with native forceArm. The code is not used or stored."""
+        del code
+        await self._client.force_arm("home")
         await self.coordinator.async_request_refresh()
 
     async def async_alarm_arm_night(self, code: str | None = None) -> None:
-        await self._client.arm("night")
+        """Arm night with native forceArm. The code is not used or stored."""
+        del code
+        await self._client.force_arm("night")
         await self.coordinator.async_request_refresh()
 
     async def async_alarm_arm_custom_bypass(self, code: str | None = None) -> None:
-        """Arm home after bypassing open zones. Arming does not use a PIN."""
+        """Arm home with native forceArm. The code is not used or stored."""
         del code
-        await self._client.arm_bypassing_open("home")
+        await self._client.force_arm("home")
         await self.coordinator.async_request_refresh()

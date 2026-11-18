@@ -13,7 +13,7 @@ This repository is [amartirosyan/ha-alula](https://github.com/amartirosyan/ha-al
 - Near-instant state updates via WebSocket push events
 - PIN code support for disarming (entered when you disarm; not saved for arming)
 
-The Arm Home, Arm Away, and Arm Night buttons still send the original no-PIN `armingLevel` write. That path can leave a Concord 4 keypad on its "press # to bypass" prompt when a zone is open. Use **Force arm** (or the panel's **Arm custom bypass** button, which force-arms Home) so open zones are bypassed before that arm command.
+Arm Home, Arm Away, Arm Night, and Arm custom bypass send the panel's native `forceArm` command and do not use a PIN. On a Concord 4 with BAT-Connect that starts the arming countdown and marks open zones bypassed. Home Assistant can take 30-90 seconds to show the new state.
 
 ## Installation
 
@@ -26,7 +26,7 @@ The Arm Home, Arm Away, and Arm Night buttons still send the original no-PIN `ar
 5. Find **Alula** in the HACS integration list and install it.
 6. Restart Home Assistant.
 
-HACS installs the latest GitHub release when this repository has one, and the `master` branch otherwise. Version 0.2.0 is the release that adds force arm.
+HACS installs the latest GitHub release when this repository has one. Version 0.2.1 is the release that arms a Concord 4 with `forceArm`.
 
 ### Manual
 
@@ -46,17 +46,17 @@ Disarm still asks for the panel PIN at the moment you disarm. Arming, force arm,
 
 Call these from **Developer tools → Actions**, an automation, or a script.
 
-Force arm Home. `method` defaults to `bypass` (bypass every currently open zone, except smoke and CO, then arm):
+Force arm Home. `method` defaults to `native` (`forceArm`, no PIN):
 
 ```yaml
 action: alula.force_arm
 data:
   entity_id: alarm_control_panel.closet_4508_ethel_ave
   mode: home
-  method: bypass
+  method: native
 ```
 
-`mode` is `home`, `away`, or `night`. `method: native` sends the panel `forceArm` command instead of bypassing zones first.
+`mode` is `home`, `away`, or `night`. `method: bypass` writes `zoneBypass` for each open zone and then arms. On a Concord 4 that does not bypass the zones: the panel stays disarmed and the keypad stays on the indirect-bypass prompt. Leave `method` at `native`.
 
 Bypass one zone from its binary sensor:
 
@@ -78,20 +78,19 @@ data:
 
 With more than one Alula panel configured, add `entity_id` of that panel when you pass a zone index.
 
-`alarm_control_panel.alarm_arm_custom_bypass` on the panel entity does the same thing as force arm Home with `method: bypass`.
+`alarm_control_panel.alarm_arm_custom_bypass` and the Arm Home, Arm Away, and Arm Night buttons send the same native `forceArm` command.
 
 ## Manual check
 
 1. Open one window and leave the other doors and motion sensors closed.
-2. Run `alula.force_arm` for `alarm_control_panel.closet_4508_ethel_ave` with `mode: home` (method `bypass`, or omit method).
-3. Confirm that window's binary sensor `bypassed` attribute is on, the alarm panel state is `armed_home`, and the Concord 4 keypad is armed and is not stuck on "press # to bypass".
-4. Disarm with the keypad, or with the alarm panel disarm action and the PIN typed into that call. Confirm the zone's `bypassed` attribute clears.
-
-`method: native` is the fallback if bypass-then-arm does not clear the keypad. It is unverified on a Concord 4 / BAT-Connect.
+2. Arm Home from the alarm panel card, or run `alula.force_arm` for `alarm_control_panel.closet_4508_ethel_ave` with `mode: home` (method `native`, or omit method).
+3. The keypad should go straight to the arming countdown and should not sit on "press # to bypass".
+4. Within about 30-90 seconds, confirm the alarm panel state is `armed_home` and the open zones show `bypassed: true`.
+5. Disarm with the keypad, or with the alarm panel disarm action and the PIN typed into that call. Confirm the zone's `bypassed` attribute clears.
 
 ## pyalula
 
-The integration vendors its own copy of the Alula client at `custom_components/alula/pyalula` (version 0.2.0). Home Assistant does not install `pyalula` from PyPI.
+The integration vendors its own copy of the Alula client at `custom_components/alula/pyalula` (version 0.2.1). Home Assistant does not install `pyalula` from PyPI.
 
 The same client still lives at the repository root for local use:
 
@@ -102,7 +101,7 @@ async with AlulaClient() as client:
     await client.login("user@example.com", "password")
     panel = await client.get_panel_status()
     print(panel.arm_state)
-    await client.arm("away")
+    await client.force_arm("away")
 ```
 
 ## Development

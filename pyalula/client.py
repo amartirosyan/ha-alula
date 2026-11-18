@@ -620,6 +620,10 @@ class AlulaClient:
     ) -> None:
         """Arm with the panel's native ``forceArm`` write. No PIN is sent.
 
+        On a Concord 4 with BAT-Connect this is the command that arms when
+        zones are open. Bypassing zones and then sending ``armingLevel`` does
+        not: the keypad stays on the indirect-bypass prompt.
+
         Payload, confirmed against cove-alula 1.4.0 ``async_force_arm``::
 
             [{"name": "forceArm",
@@ -685,6 +689,10 @@ class AlulaClient:
         refresh_zones: bool = True,
     ) -> list[int]:
         """Bypass currently open zones, then arm with the existing no-PIN arm.
+
+        On a Concord 4 with BAT-Connect this does not bypass the zones. The
+        panel stays disarmed and the keypad stays on the indirect-bypass
+        prompt. Use ``force_arm`` instead.
 
         Smoke and CO zones are left alone. Every other open zone is sent
         ``zoneBypass``, including zones the cloud already marks bypassed,

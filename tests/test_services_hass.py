@@ -163,14 +163,14 @@ async def test_force_arm_and_bypass_services(hass: HomeAssistant) -> None:
             _call(hass, "bypass_zone", {"entity_id": [zone], "zone": 1, "bypass": True}),
         )
 
-    # Registered schema: method defaults to bypass, and a string entity_id is accepted.
+    # Registered schema: method defaults to native, and a string entity_id is accepted.
     await hass.services.async_call(
         DOMAIN,
         "force_arm",
         {"entity_id": panel, "mode": "night"},
         blocking=True,
     )
-    assert client.calls[-1] == ("bypass", "night")
+    assert client.calls[-1] == ("native", "night")
     await hass.services.async_call(
         DOMAIN,
         "bypass_zone",
@@ -196,3 +196,28 @@ async def test_second_panel_requires_entity_id(hass: HomeAssistant) -> None:
     assert hass.services.has_service(DOMAIN, "force_arm")
     async_unload_services(hass)
     assert not hass.services.has_service(DOMAIN, "force_arm")
+
+
+@pytest.mark.asyncio
+async def test_panel_buttons_use_native_force_arm() -> None:
+    client = _Client()
+
+    async def _refresh() -> None:
+        return None
+
+    coordinator = SimpleNamespace(
+        last_update_success=True,
+        data=None,
+        async_request_refresh=_refresh,
+    )
+    entity = AlulaAlarmPanel(coordinator, client, object())
+    await entity.async_alarm_arm_home("1234")
+    await entity.async_alarm_arm_away(None)
+    await entity.async_alarm_arm_night(None)
+    await entity.async_alarm_arm_custom_bypass("1234")
+    assert client.calls == [
+        ("native", "home"),
+        ("native", "away"),
+        ("native", "night"),
+        ("native", "home"),
+    ]

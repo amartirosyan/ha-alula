@@ -90,7 +90,7 @@ def async_unload_services(hass: HomeAssistant) -> None:
 
 
 async def async_handle_force_arm(hass: HomeAssistant, call: ServiceCall) -> None:
-    """Arm one or more panels, bypassing open zones unless method is native."""
+    """Arm one or more panels. The default method is native forceArm."""
     mode = str(call.data[ATTR_MODE]).lower()
     method = str(call.data.get(ATTR_METHOD, DEFAULT_FORCE_ARM_METHOD)).lower()
     panels = _panels_for_force_arm(hass, _entity_ids(call))

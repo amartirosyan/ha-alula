@@ -8,6 +8,6 @@ PyPI release. Keep those two copies identical.
 from .client import AlulaClient
 from .models import AlarmPanel, ArmState, Zone, ZoneType
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 __all__ = ["AlarmPanel", "AlulaClient", "ArmState", "Zone", "ZoneType"]

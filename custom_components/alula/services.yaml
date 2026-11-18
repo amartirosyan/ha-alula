@@ -2,10 +2,11 @@ force_arm:
   name: Force arm
   description: >
     Arm the panel when doors or windows are open, without a PIN. The default
-    method bypasses the currently open zones, then arms with the normal no-PIN
-    arm command. Native sends the panel forceArm command instead. Smoke and CO
-    zones are not auto-bypassed. The zone index used by bypass is the 0-based
-    Alula index.
+    method is native forceArm, which on a Concord 4 starts the arming countdown
+    and marks open zones bypassed. The bypass method writes zoneBypass and then
+    arms; on a Concord 4 that leaves the panel disarmed and the keypad stuck on
+    the indirect-bypass prompt. Home Assistant state can lag the keypad by
+    30-90 seconds.
   fields:
     entity_id:
       name: Alarm panel
@@ -33,16 +34,18 @@ force_arm:
     method:
       name: Method
       description: >
-        bypass writes zoneBypass for each open zone, then arms. native writes
-        forceArm. bypass is the default.
+        native (the default) writes forceArm. bypass writes zoneBypass for each
+        open zone and then arms. On a Concord 4, bypass does not bypass the
+        zones: the panel stays disarmed and the keypad stays on the
+        indirect-bypass prompt.
       required: false
-      default: bypass
-      example: bypass
+      default: native
+      example: native
       selector:
         select:
           options:
-            - bypass
             - native
+            - bypass
 
 bypass_zone:
   name: Bypass zone
