@@ -36,12 +36,45 @@ from .const import (
 )
 
 PATH_SELF = "/rest/v1/self"
-from .models import AlarmPanel, ArmState, Zone, ZoneType
+from .models import AlarmPanel, Zone, ZoneType
 
 _LOGGER = logging.getLogger(__name__)
 
+# Pause between zoneBypass writes, then once more before the arm command, so the
+# panel can apply each bypass before arming starts.
+BYPASS_WRITE_INTERVAL = 0.25
+BYPASS_BEFORE_ARM_DELAY = 1.0
 
-def _parse_device_type(device_type: str) -> "ZoneType":
+# Life-safety zones are never auto-bypassed by force arm. An explicit
+# set_zone_bypass() call can still target them.
+_NO_AUTO_BYPASS: frozenset[ZoneType] = frozenset({ZoneType.SMOKE, ZoneType.CO})
+
+_SECRET_LOG_KEYS = frozenset({
+    "pin",
+    "password",
+    "access_token",
+    "refresh_token",
+    "client_secret",
+    "authorization",
+})
+
+
+def _redact(value: Any) -> Any:
+    """Return a copy safe to log. Never log a PIN, password, or token."""
+    if isinstance(value, dict):
+        redacted: dict[Any, Any] = {}
+        for key, item in value.items():
+            if str(key).lower() in _SECRET_LOG_KEYS:
+                redacted[key] = "***"
+            else:
+                redacted[key] = _redact(item)
+        return redacted
+    if isinstance(value, list):
+        return [_redact(item) for item in value]
+    return value
+
+
+def _parse_device_type(device_type: str) -> ZoneType:
     """Map Alula deviceType strings (e.g. 'DWS') to ZoneType enum."""
     t = device_type.upper()
     if t in ("DWS", "DOOR", "WINDOW"):
@@ -327,7 +360,7 @@ class AlulaClient:
 
     async def _handle_ws_message(self, msg: dict) -> None:
         """Dispatch an incoming WebSocket message."""
-        _LOGGER.debug("WS <<<: %s", msg)
+        _LOGGER.debug("WS <<<: %s", _redact(msg))
 
         # "ready" message — signal that subscriptions can now be sent
         if msg.get("message") == "ready" and "sessionId" in msg:
@@ -512,11 +545,7 @@ class AlulaClient:
         :param silent: arm without sounding exit beeps
         :param no_entry_delay: bypass entry delay
         """
-        level = _ARM_MODE_MAP.get(mode.lower())
-        if level is None:
-            raise ValueError(
-                f"Invalid arm mode {mode!r}. Use: away, stay/home, night"
-            )
+        level = self._arm_level(mode)
         await self._send_arming_level(
             level, user_number, silent, no_entry_delay, device_id
         )
@@ -583,6 +612,176 @@ class AlulaClient:
         await self._ws_send(msg)
         _LOGGER.debug("Sent armingLevel %d to panel %s", level, dev_id)
 
+    async def force_arm(
+        self,
+        mode: str,
+        user_number: int = 0,
+        device_id: str | None = None,
+    ) -> None:
+        """Arm with the panel's native ``forceArm`` write. No PIN is sent.
+
+        On a Concord 4 with BAT-Connect this is the command that arms when
+        zones are open. Bypassing zones and then sending ``armingLevel`` does
+        not: the keypad stays on the indirect-bypass prompt.
+
+        Payload, confirmed against cove-alula 1.4.0 ``async_force_arm``::
+
+            [{"name": "forceArm",
+              "value": {"armingLevelValue": N, "userNumber": 0}}]
+
+        Levels match this client's existing map: 2 home/stay, 3 night, 4 away.
+        """
+        level = self._arm_level(mode)
+        await self._send_write_mfd(
+            [{
+                "name": "forceArm",
+                "value": {
+                    "armingLevelValue": level,
+                    "userNumber": int(user_number),
+                },
+            }],
+            device_id,
+        )
+        _LOGGER.debug("Sent forceArm level %d (%s)", level, mode)
+
+    async def set_zone_bypass(
+        self,
+        zone_index: int,
+        bypass: bool = True,
+        user_number: int = 0,
+        device_id: str | None = None,
+    ) -> None:
+        """Bypass or restore one zone. No PIN is sent.
+
+        Payload, confirmed against cove-alula 1.4.0 ``async_set_zone_bypass``::
+
+            {"name": "zoneBypass"|"zoneUnbypass",
+             "indexFirst": i, "indexLast": i,
+             "items": [{"index": i, "value": {"userNumber": 0}}]}
+
+        ``zone_index`` is the 0-based Alula MFD index.
+        """
+        if isinstance(zone_index, bool) or not isinstance(zone_index, int):
+            raise TypeError(f"zone_index must be an int, got {zone_index!r}")
+        if zone_index < 0:
+            raise ValueError(f"zone_index must be >= 0, got {zone_index}")
+        name = "zoneBypass" if bypass else "zoneUnbypass"
+        await self._send_write_mfd(
+            [{
+                "name": name,
+                "indexFirst": zone_index,
+                "indexLast": zone_index,
+                "items": [{
+                    "index": zone_index,
+                    "value": {"userNumber": int(user_number)},
+                }],
+            }],
+            device_id,
+        )
+        _LOGGER.debug("Sent %s for zone %d", name, zone_index)
+
+    async def arm_bypassing_open(
+        self,
+        mode: str,
+        user_number: int = 0,
+        device_id: str | None = None,
+        *,
+        refresh_zones: bool = True,
+    ) -> list[int]:
+        """Bypass currently open zones, then arm with the existing no-PIN arm.
+
+        On a Concord 4 with BAT-Connect this does not bypass the zones. The
+        panel stays disarmed and the keypad stays on the indirect-bypass
+        prompt. Use ``force_arm`` instead.
+
+        Smoke and CO zones are left alone. Every other open zone is sent
+        ``zoneBypass``, including zones the cloud already marks bypassed,
+        because a Concord keypad can still be waiting on its bypass prompt
+        after the cloud has flipped that flag. Returns the indexes written.
+        """
+        self._arm_level(mode)  # validate before any bypass is sent
+        dev_id = device_id or self._panel_id
+        if not dev_id:
+            raise AlulaApiError("Panel ID unknown — call get_panel_status() first")
+
+        if refresh_zones:
+            try:
+                await self.fetch_zone_statuses(device_id=dev_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:
+                _LOGGER.warning(
+                    "Zone refresh before force arm failed (%s); using the last known zone state",
+                    err,
+                )
+
+        indexes = self.open_bypassable_zone_indexes()
+        for offset, index in enumerate(indexes):
+            if offset:
+                await asyncio.sleep(BYPASS_WRITE_INTERVAL)
+            await self.set_zone_bypass(
+                index, True, user_number=user_number, device_id=dev_id
+            )
+        if indexes:
+            _LOGGER.info(
+                "Bypassed open zone(s) %s before arming %s",
+                indexes,
+                mode,
+            )
+            await asyncio.sleep(BYPASS_BEFORE_ARM_DELAY)
+        else:
+            _LOGGER.info("No open zones to bypass before arming %s", mode)
+        await self.arm(mode, user_number=user_number, device_id=dev_id)
+        return indexes
+
+    def open_bypassable_zone_indexes(self) -> list[int]:
+        """0-based indexes of open zones that force arm may bypass."""
+        found: list[int] = []
+        for zone in self._zones.values():
+            if not zone.is_open:
+                continue
+            if zone.zone_type in _NO_AUTO_BYPASS:
+                _LOGGER.warning(
+                    "Not auto-bypassing %s zone %s (%s)",
+                    zone.zone_type.value,
+                    zone.id,
+                    zone.name,
+                )
+                continue
+            try:
+                found.append(int(zone.id))
+            except (TypeError, ValueError):
+                _LOGGER.warning("Skipping zone with non-numeric id %r", zone.id)
+        return sorted(set(found))
+
+    def _arm_level(self, mode: str) -> int:
+        level = _ARM_MODE_MAP.get(mode.lower())
+        if level is None:
+            raise ValueError(
+                f"Invalid arm mode {mode!r}. Use: away, stay/home, night"
+            )
+        return level
+
+    async def _send_write_mfd(
+        self,
+        payload: list[dict],
+        device_id: str | None,
+    ) -> None:
+        """Send a writeMfd command on the device.helix channel."""
+        dev_id = device_id or self._panel_id
+        if not dev_id:
+            raise AlulaApiError("Panel ID unknown — call get_panel_status() first")
+        await self._ensure_ws()
+        inner = {
+            "deviceId": dev_id,
+            "cmdrsp": "writeMfd",
+            "bypassCache": True,
+            "payload": payload,
+            "requestId": self._user_id or str(uuid.uuid4()),
+        }
+        msg = {"channel": WS_CHANNEL, "id": str(uuid.uuid4()), "send": inner}
+        await self._ws_send(msg)
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -613,7 +812,7 @@ class AlulaClient:
     async def _ws_send(self, msg: dict) -> None:
         if self._ws is None or self._ws.closed:
             raise AlulaApiError("WebSocket not connected")
-        _LOGGER.debug("WS >>>: %s", msg)
+        _LOGGER.debug("WS >>>: %s", _redact(msg))
         await self._ws.send_json(msg)
 
     @staticmethod

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import logging
-
 from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
     BinarySensorEntity,
@@ -16,16 +14,11 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DATA_COORDINATOR, DOMAIN
 from .coordinator import AlulaCoordinator
-
-try:
-    from pyalula import AlarmPanel, Zone, ZoneType
-except ImportError:
-    pass
-
-_LOGGER = logging.getLogger(__name__)
+from .identifiers import zone_unique_id
+from .pyalula import AlarmPanel, Zone, ZoneType
 
 # Map ZoneType → HA BinarySensorDeviceClass
-_DEVICE_CLASS_MAP: dict["ZoneType", BinarySensorDeviceClass] = {
+_DEVICE_CLASS_MAP: dict[ZoneType, BinarySensorDeviceClass] = {
     ZoneType.DOOR: BinarySensorDeviceClass.DOOR,
     ZoneType.WINDOW: BinarySensorDeviceClass.WINDOW,
     ZoneType.MOTION: BinarySensorDeviceClass.MOTION,
@@ -57,16 +50,16 @@ class AlulaZoneSensor(CoordinatorEntity[AlulaCoordinator], BinarySensorEntity):
 
     _attr_has_entity_name = True
 
-    def __init__(self, coordinator: AlulaCoordinator, zone: "Zone") -> None:
+    def __init__(self, coordinator: AlulaCoordinator, zone: Zone) -> None:
         super().__init__(coordinator)
         self._zone_id = zone.id
         self._attr_name = zone.name
-        self._attr_unique_id = f"alula_zone_{zone.id}"
+        self._attr_unique_id = zone_unique_id(zone.id)
         self._attr_device_class = _DEVICE_CLASS_MAP.get(
             zone.zone_type, BinarySensorDeviceClass.OPENING
         )
 
-    def _current_zone(self) -> "Zone | None":
+    def _current_zone(self) -> Zone | None:
         if self.coordinator.data is None:
             return None
         for zone in self.coordinator.data.zones:

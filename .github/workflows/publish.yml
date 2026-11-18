@@ -1,9 +1,12 @@
 name: Publish to PyPI
 
+# Integration releases are tagged v* (for example v0.2.0) and are installed
+# by HACS. Those tags must not publish pyalula: the integration vendors it.
+# Publish the standalone library only from a pyalula-v* tag.
 on:
   push:
     tags:
-      - "v*"
+      - "pyalula-v*"
 
 jobs:
   publish:

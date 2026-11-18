@@ -24,5 +24,60 @@
     "abort": {
       "already_configured": "This Alula account is already configured."
     }
+  },
+  "services": {
+    "force_arm": {
+      "name": "Force arm",
+      "description": "Arm when zones are open, without a PIN. The default is native forceArm. On a Concord 4, bypass leaves the panel disarmed and the keypad on the indirect-bypass prompt. Home Assistant state can lag the keypad by 30-90 seconds.",
+      "fields": {
+        "entity_id": {
+          "name": "Alarm panel",
+          "description": "Alula alarm panel to arm. Optional when only one panel is configured."
+        },
+        "mode": {
+          "name": "Mode",
+          "description": "Arming mode.",
+          "selector": {
+            "select": {
+              "options": {
+                "home": "Home",
+                "away": "Away",
+                "night": "Night"
+              }
+            }
+          }
+        },
+        "method": {
+          "name": "Method",
+          "description": "native (default) writes forceArm. bypass writes zoneBypass and then arms; that does not work on a Concord 4.",
+          "selector": {
+            "select": {
+              "options": {
+                "native": "Native force arm",
+                "bypass": "Bypass open zones (does not work on Concord 4)"
+              }
+            }
+          }
+        }
+      }
+    },
+    "bypass_zone": {
+      "name": "Bypass zone",
+      "description": "Bypass or restore one zone, without a PIN. Pass the zone sensor, or a 0-based Alula zone index.",
+      "fields": {
+        "entity_id": {
+          "name": "Zone or panel",
+          "description": "Zone binary sensor, or the alarm panel when a zone index is also given."
+        },
+        "zone": {
+          "name": "Zone index",
+          "description": "0-based Alula zone index, the same number as in the unique id alula_zone_<index>."
+        },
+        "bypass": {
+          "name": "Bypass",
+          "description": "Turn bypass on, or off to restore the zone."
+        }
+      }
+    }
   }
 }

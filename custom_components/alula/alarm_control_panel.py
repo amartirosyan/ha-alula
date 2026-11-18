@@ -18,16 +18,13 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DATA_CLIENT, DATA_COORDINATOR, DOMAIN
 from .coordinator import AlulaCoordinator
-
-try:
-    from pyalula import AlulaClient, AlarmPanel, ArmState
-except ImportError:
-    pass
+from .identifiers import panel_unique_id
+from .pyalula import AlarmPanel, AlulaClient, ArmState
 
 _LOGGER = logging.getLogger(__name__)
 
 # Map Alula ArmState → HA AlarmControlPanelState
-_STATE_MAP: dict["ArmState", AlarmControlPanelState] = {
+_STATE_MAP: dict[ArmState, AlarmControlPanelState] = {
     ArmState.DISARMED: AlarmControlPanelState.DISARMED,
     ArmState.ARMED_AWAY: AlarmControlPanelState.ARMED_AWAY,
     ArmState.ARMED_HOME: AlarmControlPanelState.ARMED_HOME,
@@ -59,12 +56,13 @@ class AlulaAlarmPanel(CoordinatorEntity[AlulaCoordinator], AlarmControlPanelEnti
         AlarmControlPanelEntityFeature.ARM_AWAY
         | AlarmControlPanelEntityFeature.ARM_HOME
         | AlarmControlPanelEntityFeature.ARM_NIGHT
+        | AlarmControlPanelEntityFeature.ARM_CUSTOM_BYPASS
     )
 
     def __init__(
         self,
         coordinator: AlulaCoordinator,
-        client: "AlulaClient",
+        client: AlulaClient,
         entry: ConfigEntry,
     ) -> None:
         super().__init__(coordinator)
@@ -74,7 +72,7 @@ class AlulaAlarmPanel(CoordinatorEntity[AlulaCoordinator], AlarmControlPanelEnti
     @property
     def unique_id(self) -> str:
         panel: AlarmPanel = self.coordinator.data
-        return f"alula_{panel.id}_panel"
+        return panel_unique_id(panel.id)
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -99,13 +97,25 @@ class AlulaAlarmPanel(CoordinatorEntity[AlulaCoordinator], AlarmControlPanelEnti
         await self.coordinator.async_request_refresh()
 
     async def async_alarm_arm_away(self, code: str | None = None) -> None:
-        await self._client.arm("away")
+        """Arm away with native forceArm. The code is not used or stored."""
+        del code
+        await self._client.force_arm("away")
         await self.coordinator.async_request_refresh()
 
     async def async_alarm_arm_home(self, code: str | None = None) -> None:
-        await self._client.arm("stay")
+        """Arm home with native forceArm. The code is not used or stored."""
+        del code
+        await self._client.force_arm("home")
         await self.coordinator.async_request_refresh()
 
     async def async_alarm_arm_night(self, code: str | None = None) -> None:
-        await self._client.arm("night")
+        """Arm night with native forceArm. The code is not used or stored."""
+        del code
+        await self._client.force_arm("night")
+        await self.coordinator.async_request_refresh()
+
+    async def async_alarm_arm_custom_bypass(self, code: str | None = None) -> None:
+        """Arm home with native forceArm. The code is not used or stored."""
+        del code
+        await self._client.force_arm("home")
         await self.coordinator.async_request_refresh()
