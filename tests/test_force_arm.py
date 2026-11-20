@@ -26,6 +26,7 @@ class _FakeWs:
 def client(monkeypatch: pytest.MonkeyPatch) -> AlulaClient:
     monkeypatch.setattr("pyalula.client.BYPASS_WRITE_INTERVAL", 0)
     monkeypatch.setattr("pyalula.client.BYPASS_BEFORE_ARM_DELAY", 0)
+    monkeypatch.setattr("pyalula.client.FORCEARM_THEN_LEVEL_DELAY", 0)
     panel = AlulaClient()
     panel._panel_id = "panel-1"
     panel._user_id = "user-1"
@@ -209,3 +210,203 @@ async def test_force_arm_requires_panel_id() -> None:
     panel = AlulaClient()
     with pytest.raises(AlulaApiError):
         await panel.force_arm("home")
+
+
+def test_followup_delay_is_one_second() -> None:
+    from pyalula.client import FORCEARM_THEN_LEVEL_DELAY
+
+    assert FORCEARM_THEN_LEVEL_DELAY == 1.0
+
+
+@pytest.mark.asyncio
+async def test_force_arm_flags_only_when_requested(client: AlulaClient) -> None:
+    await client.force_arm("home", silent=True, no_entry_delay=True)
+    value = _messages(client)[0]["send"]["payload"][0]["value"]
+    assert value == {
+        "armingLevelValue": ARM_LEVEL_STAY,
+        "userNumber": 0,
+        "armSilent": True,
+        "noEntryDelay": True,
+    }
+    assert "pin" not in _walk_keys(_messages(client))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("variant", "silent", "no_entry_delay"),
+    [
+        ("forcearm", True, True),
+        ("forcearm", False, False),
+    ],
+)
+async def test_variant_forcearm_always_includes_flags(
+    client: AlulaClient, variant: str, silent: bool, no_entry_delay: bool
+) -> None:
+    await client.arm_with_variant(
+        "home", variant, silent=silent, no_entry_delay=no_entry_delay
+    )
+    value = _messages(client)[0]["send"]["payload"][0]["value"]
+    assert value == {
+        "armingLevelValue": ARM_LEVEL_STAY,
+        "userNumber": 0,
+        "armSilent": silent,
+        "noEntryDelay": no_entry_delay,
+    }
+    assert "pin" not in _walk_keys(_messages(client))
+
+
+@pytest.mark.asyncio
+async def test_variant_forcearm_night_stays_level_3(client: AlulaClient) -> None:
+    """The service mode night is still level 3. Arm Night on the entity remaps."""
+    await client.arm_with_variant("night", "forcearm", silent=True, no_entry_delay=True)
+    value = _messages(client)[0]["send"]["payload"][0]["value"]
+    assert value["armingLevelValue"] == ARM_LEVEL_NIGHT
+
+
+@pytest.mark.asyncio
+async def test_variant_arminglevel_payload(client: AlulaClient) -> None:
+    await client.arm_with_variant("away", "arminglevel", silent=True, no_entry_delay=False)
+    arm = _messages(client)[0]["send"]
+    assert arm["cmdrsp"] == "writeMfd"
+    assert "bypassCache" not in arm
+    assert arm["payload"] == [{
+        "name": "armingLevel",
+        "value": {
+            "armingLevelValue": ARM_LEVEL_AWAY,
+            "userNumber": 0,
+            "armSilent": True,
+            "noEntryDelay": False,
+        },
+    }]
+    assert "pin" not in _walk_keys(arm)
+
+
+@pytest.mark.asyncio
+async def test_variant_partition_has_no_pin(client: AlulaClient) -> None:
+    await client.arm_with_variant(
+        "home", "partition", silent=True, no_entry_delay=True
+    )
+    inner = _messages(client)[0]["send"]
+    assert inner["cmdrsp"] == "partitionArmingLevelChange"
+    assert inner["deviceId"] == "panel-1"
+    assert "bypassCache" not in inner
+    assert inner["requestId"] != "user-1"
+    assert inner["payload"] == {
+        "armingLevel": "stay",
+        "partitions": [True, False, False, False, False, False, False, False],
+        "armSilent": True,
+        "noEntryDelay": True,
+        "authType": "user",
+        "userNumber": 0,
+        "forceArm": False,
+    }
+    assert "pin" not in _walk_keys(inner)
+
+
+@pytest.mark.asyncio
+async def test_variant_forcearm_then_arminglevel(
+    client: AlulaClient,
+) -> None:
+    await client.arm_with_variant(
+        "home",
+        "forcearm_then_arminglevel",
+        silent=True,
+        no_entry_delay=True,
+    )
+    sent = _messages(client)
+    assert [item["send"]["payload"][0]["name"] for item in sent] == [
+        "forceArm",
+        "armingLevel",
+    ]
+    assert sent[0]["send"]["payload"][0]["value"] == {
+        "armingLevelValue": ARM_LEVEL_STAY,
+        "userNumber": 0,
+    }
+    assert "armSilent" not in sent[0]["send"]["payload"][0]["value"]
+    assert sent[0]["send"]["bypassCache"] is True
+    assert sent[1]["send"]["payload"] == [{
+        "name": "armingLevel",
+        "value": {
+            "armingLevelValue": ARM_LEVEL_STAY,
+            "userNumber": 0,
+            "armSilent": True,
+            "noEntryDelay": True,
+        },
+    }]
+    assert "bypassCache" not in sent[1]["send"]
+    assert "pin" not in _walk_keys(sent)
+
+
+@pytest.mark.asyncio
+async def test_unknown_variant_sends_nothing(client: AlulaClient) -> None:
+    with pytest.raises(ValueError):
+        await client.arm_with_variant("home", "level3")
+    assert _messages(client) == []
+
+
+@pytest.mark.asyncio
+async def test_arm_commands_and_ack_nak_log_at_info(
+    client: AlulaClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger="pyalula.client")
+    await client.force_arm("home", silent=True, no_entry_delay=True)
+    assert "Alula WS command" in caplog.text
+    assert "forceArm" in caplog.text
+    assert "armSilent" in caplog.text
+    assert "'pin'" not in caplog.text
+
+    request_id = _messages(client)[0]["send"]["requestId"]
+    await client._handle_ws_message({
+        "event": {
+            "data": {
+                "cmdrsp": "ack",
+                "requestId": request_id,
+                "payload": {},
+            }
+        }
+    })
+    assert "Alula panel ACK" in caplog.text
+
+    await client.arm_with_variant("home", "partition", silent=True, no_entry_delay=True)
+    partition_id = _messages(client)[-1]["send"]["requestId"]
+    await client._handle_ws_message({
+        "event": {
+            "data": {
+                "cmdrsp": "nak",
+                "requestId": partition_id,
+                "payload": {
+                    "nakReasons": [{"reason": "unsupported command"}],
+                    "pin": ["9", "9", "9", "9"],
+                },
+            }
+        }
+    })
+    assert "Alula panel NAK" in caplog.text
+    assert "unsupported command" in caplog.text
+    assert "9999" not in caplog.text
+    assert "'pin': '***'" in caplog.text
+    assert "['9', '9', '9', '9']" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_unrelated_ack_is_not_an_arm_reply(
+    client: AlulaClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger="pyalula.client")
+    await client.force_arm("home")
+    await client._handle_ws_message({
+        "event": {"data": {"cmdrsp": "ack", "requestId": "someone-else"}}
+    })
+    assert "Alula panel ACK" not in caplog.text
+    assert client._arm_inflight
+
+
+@pytest.mark.asyncio
+async def test_ack_without_request_id_still_logs_while_arming(
+    client: AlulaClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger="pyalula.client")
+    await client.force_arm("home")
+    await client._handle_ws_message({"event": {"data": {"cmdrsp": "ACK"}}})
+    assert "Alula panel ACK" in caplog.text
+    assert client._arm_inflight == []

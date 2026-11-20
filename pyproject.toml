@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyalula"
-version = "0.2.1"
+version = "0.2.2"
 description = "Python client library for the Alula alarm panel API"
 readme = "README.md"
 license = "MIT"

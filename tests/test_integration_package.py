@@ -32,7 +32,7 @@ def test_vendored_client_matches_library() -> None:
 def test_manifest_drops_pypi_client() -> None:
     manifest = json.loads((COMPONENT / "manifest.json").read_text())
     assert manifest["domain"] == "alula"
-    assert manifest["version"] == "0.2.1"
+    assert manifest["version"] == "0.2.2"
     assert manifest["version"] == pyalula.__version__
     assert manifest["config_flow"] is True
     assert manifest["requirements"] == []
@@ -55,7 +55,21 @@ def test_service_descriptions_and_translations() -> None:
     assert strings == english
     assert set(strings["services"]) == {"force_arm", "bypass_zone"}
     force = strings["services"]["force_arm"]
-    assert set(force["fields"]) == {"entity_id", "mode", "method"}
+    assert set(force["fields"]) == {
+        "entity_id",
+        "mode",
+        "method",
+        "silent",
+        "no_entry_delay",
+        "variant",
+    }
+    assert set(force["fields"]["variant"]["selector"]["select"]["options"]) == {
+        "forcearm",
+        "arminglevel",
+        "partition",
+        "forcearm_then_arminglevel",
+    }
+    assert strings["options"]["step"]["init"]["data"]["night_arm_variant"]
     assert set(force["fields"]["mode"]["selector"]["select"]["options"]) == {
         "home",
         "away",
@@ -84,5 +98,9 @@ def test_unique_ids_stay_the_same() -> None:
     panel_source = (COMPONENT / "alarm_control_panel.py").read_text()
     zone_source = (COMPONENT / "binary_sensor.py").read_text()
     assert "panel_unique_id(panel.id)" in panel_source
+    assert "arm_with_variant" in panel_source
+    assert 'force_arm("night")' not in panel_source
+    assert "silent=True" in panel_source
+    assert "no_entry_delay=True" in panel_source
     assert "zone_unique_id(zone.id)" in zone_source
     assert '"bypassed": zone.is_bypassed' in zone_source

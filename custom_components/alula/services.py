@@ -18,6 +18,9 @@ from .const import (
     ATTR_BYPASS,
     ATTR_METHOD,
     ATTR_MODE,
+    ATTR_NO_ENTRY_DELAY,
+    ATTR_SILENT,
+    ATTR_VARIANT,
     ATTR_ZONE,
     DATA_CLIENT,
     DATA_COORDINATOR,
@@ -25,6 +28,7 @@ from .const import (
     DOMAIN,
     FORCE_ARM_METHODS,
     FORCE_ARM_MODES,
+    FORCE_ARM_VARIANTS,
     SERVICE_BYPASS_ZONE,
     SERVICE_FORCE_ARM,
 )
@@ -41,6 +45,9 @@ FORCE_ARM_SCHEMA = vol.Schema(
         vol.Optional(ATTR_METHOD, default=DEFAULT_FORCE_ARM_METHOD): vol.In(
             FORCE_ARM_METHODS
         ),
+        vol.Optional(ATTR_SILENT, default=False): cv.boolean,
+        vol.Optional(ATTR_NO_ENTRY_DELAY, default=False): cv.boolean,
+        vol.Optional(ATTR_VARIANT): vol.In(FORCE_ARM_VARIANTS),
     }
 )
 
@@ -93,14 +100,35 @@ async def async_handle_force_arm(hass: HomeAssistant, call: ServiceCall) -> None
     """Arm one or more panels. The default method is native forceArm."""
     mode = str(call.data[ATTR_MODE]).lower()
     method = str(call.data.get(ATTR_METHOD, DEFAULT_FORCE_ARM_METHOD)).lower()
+    silent = bool(call.data.get(ATTR_SILENT, False))
+    no_entry_delay = bool(call.data.get(ATTR_NO_ENTRY_DELAY, False))
+    variant = call.data.get(ATTR_VARIANT)
+    if variant is not None:
+        variant = str(variant).lower()
     panels = _panels_for_force_arm(hass, _entity_ids(call))
-    _LOGGER.info("Alula force arm mode=%s method=%s", mode, method)
+    _LOGGER.info(
+        "Alula force arm mode=%s method=%s silent=%s no_entry_delay=%s variant=%s",
+        mode,
+        method,
+        silent,
+        no_entry_delay,
+        variant or "",
+    )
     refreshed: list[AlulaCoordinator] = []
     try:
         for client, coordinator in panels:
             if coordinator not in refreshed:
                 refreshed.append(coordinator)
-            await _invoke(_dispatch_force_arm(client, mode, method))
+            await _invoke(
+                _dispatch_force_arm(
+                    client,
+                    mode,
+                    method,
+                    silent=silent,
+                    no_entry_delay=no_entry_delay,
+                    variant=variant,
+                )
+            )
     finally:
         for coordinator in refreshed:
             await coordinator.async_request_refresh()
@@ -237,11 +265,42 @@ def _sole_bundle(
     return _bundle(hass, next(iter(bucket)))
 
 
-async def _dispatch_force_arm(client: AlulaClient, mode: str, method: str) -> None:
+async def _dispatch_force_arm(
+    client: AlulaClient,
+    mode: str,
+    method: str,
+    *,
+    silent: bool = False,
+    no_entry_delay: bool = False,
+    variant: str | None = None,
+) -> None:
+    """Arm without a PIN.
+
+    A variant selects the payload shape and is what a live test uses.
+    With no variant, method native/bypass keeps the previous call.
+    Flags are forwarded only when one of them is true, so a default call
+    stays the payload that already armed a Concord 4.
+    """
+    if variant:
+        await client.arm_with_variant(
+            mode,
+            variant,
+            silent=silent,
+            no_entry_delay=no_entry_delay,
+        )
+        return
     if method == "native":
+        if silent or no_entry_delay:
+            await client.force_arm(mode, silent=silent, no_entry_delay=no_entry_delay)
+            return
         await client.force_arm(mode)
         return
     if method == "bypass":
+        if silent or no_entry_delay:
+            await client.arm_bypassing_open(
+                mode, silent=silent, no_entry_delay=no_entry_delay
+            )
+            return
         await client.arm_bypassing_open(mode)
         return
     raise ServiceValidationError(

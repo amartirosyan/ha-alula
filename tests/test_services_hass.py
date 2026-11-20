@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from inspect import signature
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,8 +14,10 @@ pytest.importorskip("homeassistant")
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "custom_components"))
 
+import voluptuous as vol
 from alula.alarm_control_panel import AlulaAlarmPanel
-from alula.const import DATA_CLIENT, DATA_COORDINATOR, DOMAIN
+from alula.config_flow import AlulaOptionsFlow
+from alula.const import CONF_NIGHT_ARM_VARIANT, DATA_CLIENT, DATA_COORDINATOR, DOMAIN
 from alula.identifiers import panel_unique_id, zone_unique_id
 from alula.services import (
     async_handle_bypass_zone,
@@ -26,6 +29,7 @@ from homeassistant.components.alarm_control_panel import (
     AlarmControlPanelEntityFeature,
 )
 from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import entity_registry as er
 
@@ -37,11 +41,20 @@ class _Client:
     def __init__(self) -> None:
         self.calls: list[tuple] = []
 
-    async def force_arm(self, mode: str) -> None:
-        self.calls.append(("native", mode))
+    async def force_arm(self, mode: str, **kwargs) -> None:
+        if kwargs:
+            self.calls.append(("native", mode, kwargs))
+        else:
+            self.calls.append(("native", mode))
 
-    async def arm_bypassing_open(self, mode: str) -> None:
-        self.calls.append(("bypass", mode))
+    async def arm_bypassing_open(self, mode: str, **kwargs) -> None:
+        if kwargs:
+            self.calls.append(("bypass", mode, kwargs))
+        else:
+            self.calls.append(("bypass", mode))
+
+    async def arm_with_variant(self, mode: str, variant: str, **kwargs) -> None:
+        self.calls.append(("variant", mode, variant, kwargs))
 
     async def set_zone_bypass(self, index: int, bypass: bool = True) -> None:
         self.calls.append(("zone", index, bypass))
@@ -56,7 +69,13 @@ class _Coordinator:
 
 
 def _call(hass: HomeAssistant, service: str, data: dict) -> ServiceCall:
-    return ServiceCall(hass, DOMAIN, service, data)
+    """Build a service call on HA 2024.11 and on later cores.
+
+    2025+ takes hass as the first argument. 2024.11 does not.
+    """
+    if "hass" in signature(ServiceCall.__init__).parameters:
+        return ServiceCall(hass, DOMAIN, service, data)
+    return ServiceCall(DOMAIN, service, data)
 
 
 @pytest.fixture
@@ -213,11 +232,98 @@ async def test_panel_buttons_use_native_force_arm() -> None:
     entity = AlulaAlarmPanel(coordinator, client, object())
     await entity.async_alarm_arm_home("1234")
     await entity.async_alarm_arm_away(None)
-    await entity.async_alarm_arm_night(None)
+    await entity.async_alarm_arm_night("1234")
     await entity.async_alarm_arm_custom_bypass("1234")
     assert client.calls == [
         ("native", "home"),
         ("native", "away"),
-        ("native", "night"),
+        ("variant", "home", "forcearm", {"silent": True, "no_entry_delay": True}),
         ("native", "home"),
     ]
+    assert "1234" not in repr(client.calls)
+
+    chosen = _Client()
+    entry = SimpleNamespace(options={"night_arm_variant": "partition"})
+    panel = AlulaAlarmPanel(coordinator, chosen, entry)
+    await panel.async_alarm_arm_night(None)
+    assert chosen.calls == [
+        ("variant", "home", "partition", {"silent": True, "no_entry_delay": True}),
+    ]
+
+    fallback = _Client()
+    bad = SimpleNamespace(options={"night_arm_variant": "level3"})
+    panel = AlulaAlarmPanel(coordinator, fallback, bad)
+    await panel.async_alarm_arm_night(None)
+    assert fallback.calls[0][2] == "forcearm"
+
+
+@pytest.mark.asyncio
+async def test_force_arm_variant_and_flags(hass: HomeAssistant) -> None:
+    client, _coordinator = _install(
+        hass, ENTRY_A, "closet_4508_ethel_ave", "kitchen_window", "4"
+    )
+    panel = "alarm_control_panel.closet_4508_ethel_ave"
+    await async_handle_force_arm(
+        hass,
+        _call(
+            hass,
+            "force_arm",
+            {
+                "entity_id": [panel],
+                "mode": "home",
+                "silent": True,
+                "no_entry_delay": True,
+                "variant": "arminglevel",
+            },
+        ),
+    )
+    assert client.calls[-1] == (
+        "variant",
+        "home",
+        "arminglevel",
+        {"silent": True, "no_entry_delay": True},
+    )
+
+    await async_handle_force_arm(
+        hass,
+        _call(
+            hass,
+            "force_arm",
+            {
+                "entity_id": [panel],
+                "mode": "home",
+                "method": "native",
+                "silent": True,
+                "no_entry_delay": False,
+            },
+        ),
+    )
+    assert client.calls[-1] == (
+        "native",
+        "home",
+        {"silent": True, "no_entry_delay": False},
+    )
+
+    async_setup_services(hass)
+    with pytest.raises(vol.Invalid):
+        await hass.services.async_call(
+            DOMAIN,
+            "force_arm",
+            {"entity_id": panel, "mode": "home", "variant": "level3"},
+            blocking=True,
+        )
+
+
+@pytest.mark.asyncio
+async def test_options_flow_stores_night_variant() -> None:
+    flow = AlulaOptionsFlow(SimpleNamespace(options={}))
+    shown = await flow.async_step_init()
+    assert shown["type"] == FlowResultType.FORM
+    created = await flow.async_step_init(
+        {CONF_NIGHT_ARM_VARIANT: "forcearm_then_arminglevel"}
+    )
+    assert created["type"] == FlowResultType.CREATE_ENTRY
+    assert created["data"] == {
+        CONF_NIGHT_ARM_VARIANT: "forcearm_then_arminglevel",
+    }
+    assert "pin" not in created["data"]

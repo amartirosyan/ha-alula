@@ -21,6 +21,7 @@ from .const import (
     ARM_LEVEL_DISARM,
     ARM_LEVEL_NIGHT,
     ARM_LEVEL_STAY,
+    ARM_VARIANTS,
     BASE_URL,
     OAUTH_CLIENT_ID,
     OAUTH_CLIENT_SECRET,
@@ -44,6 +45,10 @@ _LOGGER = logging.getLogger(__name__)
 # panel can apply each bypass before arming starts.
 BYPASS_WRITE_INTERVAL = 0.25
 BYPASS_BEFORE_ARM_DELAY = 1.0
+# After a proven forceArm, wait before the follow-up armingLevel write that
+# carries armSilent and noEntryDelay. Short enough to still be inside the
+# exit window on a Concord 4.
+FORCEARM_THEN_LEVEL_DELAY = 1.0
 
 # Life-safety zones are never auto-bypassed by force arm. An explicit
 # set_zone_bypass() call can still target them.
@@ -99,6 +104,56 @@ _ARM_MODE_MAP: dict[str, int] = {
     "away": ARM_LEVEL_AWAY,
 }
 
+# String names used by partitionArmingLevelChange (ConnectFlex).
+_PARTITION_LEVEL_NAME: dict[int, str] = {
+    ARM_LEVEL_DISARM: "disarm",
+    ARM_LEVEL_STAY: "stay",
+    ARM_LEVEL_NIGHT: "night",
+    ARM_LEVEL_AWAY: "away",
+}
+
+
+def _panel_reply(msg: dict) -> tuple[str | None, str | None, str]:
+    """Pull request id, cmdrsp, and NAK reasons out of a panel frame."""
+    if not isinstance(msg, dict):
+        return None, None, ""
+    nodes: list[dict] = [msg]
+    event = msg.get("event")
+    if isinstance(event, dict):
+        data = event.get("data")
+        if isinstance(data, dict):
+            nodes.append(data)
+            payload = data.get("payload")
+            if isinstance(payload, dict):
+                nodes.append(payload)
+    send = msg.get("send")
+    if isinstance(send, dict):
+        nodes.append(send)
+        payload = send.get("payload")
+        if isinstance(payload, dict):
+            nodes.append(payload)
+    request_id: str | None = None
+    cmdrsp: str | None = None
+    reasons: list[str] = []
+    for node in nodes:
+        if request_id is None:
+            raw_id = node.get("requestId", node.get("requestID"))
+            if raw_id:
+                request_id = str(raw_id)
+        raw_cmd = node.get("cmdrsp")
+        if cmdrsp is None and isinstance(raw_cmd, str):
+            cmdrsp = raw_cmd.lower()
+        nak = node.get("nakReasons")
+        if isinstance(nak, list):
+            for item in nak:
+                if isinstance(item, dict):
+                    reason = item.get("reason", item.get("message"))
+                    if reason:
+                        reasons.append(str(reason))
+                elif item:
+                    reasons.append(str(item))
+    return request_id, cmdrsp, ", ".join(reasons)
+
 
 class AlulaAuthError(Exception):
     """Invalid credentials or expired token."""
@@ -151,6 +206,10 @@ class AlulaClient:
 
         # Optional callback fired when keypad indicates an arm state transition
         self.on_arm_state_change: callable | None = None
+
+        # Request ids of arm commands waiting for a panel ack or NAK.
+        # Each entry is the envelope id plus the inner requestId.
+        self._arm_inflight: list[set[str]] = []
 
     @property
     def ws_connected(self) -> bool:
@@ -361,6 +420,7 @@ class AlulaClient:
     async def _handle_ws_message(self, msg: dict) -> None:
         """Dispatch an incoming WebSocket message."""
         _LOGGER.debug("WS <<<: %s", _redact(msg))
+        self._log_arm_reply(msg)
 
         # "ready" message — signal that subscriptions can now be sent
         if msg.get("message") == "ready" and "sessionId" in msg:
@@ -609,14 +669,16 @@ class AlulaClient:
             "requestId": self._user_id or str(uuid.uuid4()),
         }
         msg = {"channel": WS_CHANNEL, "id": str(uuid.uuid4()), "send": inner}
-        await self._ws_send(msg)
-        _LOGGER.debug("Sent armingLevel %d to panel %s", level, dev_id)
+        await self._ws_send(msg, arm_trace=True)
 
     async def force_arm(
         self,
         mode: str,
         user_number: int = 0,
         device_id: str | None = None,
+        *,
+        silent: bool = False,
+        no_entry_delay: bool = False,
     ) -> None:
         """Arm with the panel's native ``forceArm`` write. No PIN is sent.
 
@@ -630,19 +692,154 @@ class AlulaClient:
               "value": {"armingLevelValue": N, "userNumber": 0}}]
 
         Levels match this client's existing map: 2 home/stay, 3 night, 4 away.
+
+        ``armSilent`` and ``noEntryDelay`` are added only when one of them is
+        true. No captured command shows those keys on ``forceArm``; that
+        shape is unverified on a Concord 4. A default call keeps the payload
+        that armed a Concord 4.
+        """
+        await self._send_force_arm(
+            mode,
+            user_number=user_number,
+            device_id=device_id,
+            silent=silent,
+            no_entry_delay=no_entry_delay,
+            include_flags=bool(silent or no_entry_delay),
+        )
+
+    async def arm_with_variant(
+        self,
+        mode: str,
+        variant: str,
+        user_number: int = 0,
+        device_id: str | None = None,
+        *,
+        silent: bool = False,
+        no_entry_delay: bool = False,
+    ) -> None:
+        """Send one no-PIN arm shape so the payload can be live-tested.
+
+        ``forcearm`` puts the flags on the forceArm value.
+        ``arminglevel`` is the existing armingLevel write.
+        ``partition`` is partitionArmingLevelChange with authType user.
+        ``forcearm_then_arminglevel`` sends the proven forceArm, waits, then
+        writes armingLevel with the flags.
+
+        None of these send or store a PIN. The flags are unverified on a
+        Concord 4. Concord 4 has no night level: pass mode ``home`` (stay)
+        for the silent no-delay stay experiment.
+        """
+        kind = variant.strip().lower()
+        if kind not in ARM_VARIANTS:
+            raise ValueError(
+                f"Invalid arm variant {variant!r}. Use: {', '.join(ARM_VARIANTS)}"
+            )
+        if kind == "forcearm":
+            await self._send_force_arm(
+                mode,
+                user_number=user_number,
+                device_id=device_id,
+                silent=silent,
+                no_entry_delay=no_entry_delay,
+                include_flags=True,
+            )
+            return
+        if kind == "arminglevel":
+            await self.arm(
+                mode,
+                user_number=user_number,
+                silent=silent,
+                no_entry_delay=no_entry_delay,
+                device_id=device_id,
+            )
+            return
+        if kind == "partition":
+            await self._send_partition_arm(
+                mode,
+                user_number=user_number,
+                device_id=device_id,
+                silent=silent,
+                no_entry_delay=no_entry_delay,
+            )
+            return
+        await self._send_force_arm(
+            mode,
+            user_number=user_number,
+            device_id=device_id,
+            silent=False,
+            no_entry_delay=False,
+            include_flags=False,
+        )
+        await asyncio.sleep(FORCEARM_THEN_LEVEL_DELAY)
+        await self.arm(
+            mode,
+            user_number=user_number,
+            silent=silent,
+            no_entry_delay=no_entry_delay,
+            device_id=device_id,
+        )
+
+    async def _send_force_arm(
+        self,
+        mode: str,
+        user_number: int,
+        device_id: str | None,
+        silent: bool,
+        no_entry_delay: bool,
+        include_flags: bool,
+    ) -> None:
+        level = self._arm_level(mode)
+        value: dict[str, Any] = {
+            "armingLevelValue": level,
+            "userNumber": int(user_number),
+        }
+        if include_flags:
+            value["armSilent"] = bool(silent)
+            value["noEntryDelay"] = bool(no_entry_delay)
+        await self._send_write_mfd(
+            [{"name": "forceArm", "value": value}],
+            device_id,
+            arm_trace=True,
+        )
+
+    async def _send_partition_arm(
+        self,
+        mode: str,
+        user_number: int,
+        device_id: str | None,
+        silent: bool,
+        no_entry_delay: bool,
+    ) -> None:
+        """partitionArmingLevelChange, authType user, no PIN.
+
+        Payload matches the ConnectFlex arm in cove-alula
+        ``_build_arming_command`` (kind ``partition``), including
+        ``forceArm: false`` inside that payload. Unverified on a Concord 4.
         """
         level = self._arm_level(mode)
-        await self._send_write_mfd(
-            [{
-                "name": "forceArm",
-                "value": {
-                    "armingLevelValue": level,
-                    "userNumber": int(user_number),
-                },
-            }],
-            device_id,
-        )
-        _LOGGER.debug("Sent forceArm level %d (%s)", level, mode)
+        name = _PARTITION_LEVEL_NAME.get(level)
+        if name is None:
+            raise ValueError(f"Partition arming does not support level {level}")
+        dev_id = device_id or self._panel_id
+        if not dev_id:
+            raise AlulaApiError("Panel ID unknown — call get_panel_status() first")
+        await self._ensure_ws()
+        inner = {
+            "deviceId": dev_id,
+            "cmdrsp": "partitionArmingLevelChange",
+            "payload": {
+                "armingLevel": name,
+                "partitions": [True, False, False, False, False, False, False, False],
+                "armSilent": bool(silent),
+                "noEntryDelay": bool(no_entry_delay),
+                "authType": "user",
+                "userNumber": int(user_number),
+                "forceArm": False,
+            },
+            "requestId": str(uuid.uuid4()),
+        }
+        msg = {"channel": WS_CHANNEL, "id": str(uuid.uuid4()), "send": inner}
+        await self._ws_send(msg, arm_trace=True)
 
     async def set_zone_bypass(
         self,
@@ -687,6 +884,8 @@ class AlulaClient:
         device_id: str | None = None,
         *,
         refresh_zones: bool = True,
+        silent: bool = False,
+        no_entry_delay: bool = False,
     ) -> list[int]:
         """Bypass currently open zones, then arm with the existing no-PIN arm.
 
@@ -731,7 +930,13 @@ class AlulaClient:
             await asyncio.sleep(BYPASS_BEFORE_ARM_DELAY)
         else:
             _LOGGER.info("No open zones to bypass before arming %s", mode)
-        await self.arm(mode, user_number=user_number, device_id=dev_id)
+        await self.arm(
+            mode,
+            user_number=user_number,
+            silent=silent,
+            no_entry_delay=no_entry_delay,
+            device_id=dev_id,
+        )
         return indexes
 
     def open_bypassable_zone_indexes(self) -> list[int]:
@@ -766,6 +971,8 @@ class AlulaClient:
         self,
         payload: list[dict],
         device_id: str | None,
+        *,
+        arm_trace: bool = False,
     ) -> None:
         """Send a writeMfd command on the device.helix channel."""
         dev_id = device_id or self._panel_id
@@ -780,7 +987,7 @@ class AlulaClient:
             "requestId": self._user_id or str(uuid.uuid4()),
         }
         msg = {"channel": WS_CHANNEL, "id": str(uuid.uuid4()), "send": inner}
-        await self._ws_send(msg)
+        await self._ws_send(msg, arm_trace=arm_trace)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -809,11 +1016,83 @@ class AlulaClient:
         if self._ws is None or self._ws.closed:
             await self.connect_ws()
 
-    async def _ws_send(self, msg: dict) -> None:
+    def _arm_ids(self, msg: dict) -> set[str]:
+        ids: set[str] = set()
+        envelope_id = msg.get("id")
+        if envelope_id:
+            ids.add(str(envelope_id))
+        send = msg.get("send")
+        if isinstance(send, dict) and send.get("requestId"):
+            ids.add(str(send["requestId"]))
+        return ids
+
+    def _note_arm_command(self, msg: dict) -> None:
+        ids = self._arm_ids(msg)
+        if not ids:
+            return
+        self._arm_inflight.append(ids)
+        if len(self._arm_inflight) > 20:
+            del self._arm_inflight[:-20]
+
+    def _drop_arm_command(self, msg: dict) -> None:
+        ids = self._arm_ids(msg)
+        for group in self._arm_inflight:
+            if group & ids:
+                self._arm_inflight.remove(group)
+                return
+
+    def _log_arm_reply(self, msg: dict) -> None:
+        """Log a panel ack or NAK for an arm command at INFO. Never a PIN."""
+        if not self._arm_inflight:
+            return
+        request_id, cmdrsp, reasons = _panel_reply(msg)
+        if cmdrsp not in ("ack", "nak"):
+            return
+        if request_id:
+            matched = False
+            for group in self._arm_inflight:
+                if request_id in group:
+                    self._arm_inflight.remove(group)
+                    matched = True
+                    break
+            if not matched:
+                return
+        else:
+            self._arm_inflight.pop(0)
+        redacted = _redact(msg)
+        if reasons:
+            _LOGGER.info(
+                "Alula panel %s requestId=%s reasons=%s: %s",
+                cmdrsp.upper(),
+                request_id or "",
+                reasons,
+                redacted,
+            )
+            return
+        _LOGGER.info(
+            "Alula panel %s requestId=%s: %s",
+            cmdrsp.upper(),
+            request_id or "",
+            redacted,
+        )
+
+    async def _ws_send(self, msg: dict, *, arm_trace: bool = False) -> None:
         if self._ws is None or self._ws.closed:
             raise AlulaApiError("WebSocket not connected")
-        _LOGGER.debug("WS >>>: %s", _redact(msg))
-        await self._ws.send_json(msg)
+        redacted = _redact(msg)
+        if arm_trace:
+            # Record the id and log before the await. The receive loop can run
+            # while send_json yields, and the ack can arrive before we resume.
+            self._note_arm_command(msg)
+            _LOGGER.info("Alula WS command: %s", redacted)
+        else:
+            _LOGGER.debug("WS >>>: %s", redacted)
+        try:
+            await self._ws.send_json(msg)
+        except Exception:
+            if arm_trace:
+                self._drop_arm_command(msg)
+            raise
 
     @staticmethod
     async def _handle_response(resp: aiohttp.ClientResponse) -> Any:

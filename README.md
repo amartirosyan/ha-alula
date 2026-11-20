@@ -13,7 +13,9 @@ This repository is [amartirosyan/ha-alula](https://github.com/amartirosyan/ha-al
 - Near-instant state updates via WebSocket push events
 - PIN code support for disarming (entered when you disarm; not saved for arming)
 
-Arm Home, Arm Away, Arm Night, and Arm custom bypass send the panel's native `forceArm` command and do not use a PIN. On a Concord 4 with BAT-Connect that starts the arming countdown and marks open zones bypassed. Home Assistant can take 30-90 seconds to show the new state.
+Arm Home, Arm Away, and Arm custom bypass send the panel's native `forceArm` command and do not use a PIN. On a Concord 4 with BAT-Connect that starts the arming countdown and marks open zones bypassed. Home Assistant can take 30-90 seconds to show the new state.
+
+Arm Night sends Stay (arming level 2, the same level as Arm Home) with `armSilent` and `noEntryDelay`. Concord 4 has no Night level; a level 3 command is ignored. Success on the keypad is `ARMED TO STAY NO DELAY` and no exit beeps. Home Assistant shows `armed_home`, because the panel is in stay. Those two flags are unverified on a Concord 4. The button uses the `night_arm_variant` option, which defaults to `forcearm`, and does not use a PIN. Change the variant under **Settings → Devices & services → Alula → Configure** after a live test shows which payload the panel accepts.
 
 ## Installation
 
@@ -26,7 +28,7 @@ Arm Home, Arm Away, Arm Night, and Arm custom bypass send the panel's native `fo
 5. Find **Alula** in the HACS integration list and install it.
 6. Restart Home Assistant.
 
-HACS installs the latest GitHub release when this repository has one. Version 0.2.1 is the release that arms a Concord 4 with `forceArm`.
+HACS installs the latest GitHub release when this repository has one. Version 0.2.2 is the Concord 4 Arm Night release (Stay, silent exit, no entry delay). After the `v0.2.2` release is published, open **HACS → Integrations → Alula**, choose **Redownload** (or Update), and restart Home Assistant. The installed manifest version is `0.2.2`.
 
 ### Manual
 
@@ -58,6 +60,60 @@ data:
 
 `mode` is `home`, `away`, or `night`. `method: bypass` writes `zoneBypass` for each open zone and then arms. On a Concord 4 that does not bypass the zones: the panel stays disarmed and the keypad stays on the indirect-bypass prompt. Leave `method` at `native`.
 
+`silent` and `no_entry_delay` default to false. With both false and no `variant`, the command is the same `forceArm` payload as 0.2.1. `variant` picks a payload to live-test. It does not send a PIN. `armSilent` and `noEntryDelay` are unverified on a Concord 4.
+
+Concord 4 silent stay (the Arm Night experiment). Disarm between tries. Success is keypad text `ARMED TO STAY NO DELAY` and no exit beeps. A NAK in the log means that variant was rejected.
+
+Turn info logging on once, then call each variant:
+
+```yaml
+action: logger.set_level
+data:
+  custom_components.alula: info
+```
+
+```yaml
+action: alula.force_arm
+data:
+  entity_id: alarm_control_panel.closet_4508_ethel_ave
+  mode: home
+  silent: true
+  no_entry_delay: true
+  variant: forcearm
+```
+
+```yaml
+action: alula.force_arm
+data:
+  entity_id: alarm_control_panel.closet_4508_ethel_ave
+  mode: home
+  silent: true
+  no_entry_delay: true
+  variant: arminglevel
+```
+
+```yaml
+action: alula.force_arm
+data:
+  entity_id: alarm_control_panel.closet_4508_ethel_ave
+  mode: home
+  silent: true
+  no_entry_delay: true
+  variant: partition
+```
+
+```yaml
+action: alula.force_arm
+data:
+  entity_id: alarm_control_panel.closet_4508_ethel_ave
+  mode: home
+  silent: true
+  no_entry_delay: true
+  variant: forcearm_then_arminglevel
+```
+
+`mode: home` is Stay, level 2. `mode: night` is still level 3, which a Concord 4 ignores. Logs (`Alula WS command`, `Alula panel ACK`, `Alula panel NAK`) show the command and whether the panel accepted it. PINs are not logged. `forcearm_then_arminglevel` sends the proven `forceArm` stay, waits one second, then writes `armingLevel` stay with the flags.
+
 Bypass one zone from its binary sensor:
 
 ```yaml
@@ -78,7 +134,7 @@ data:
 
 With more than one Alula panel configured, add `entity_id` of that panel when you pass a zone index.
 
-`alarm_control_panel.alarm_arm_custom_bypass` and the Arm Home, Arm Away, and Arm Night buttons send the same native `forceArm` command.
+`alarm_control_panel.alarm_arm_custom_bypass` and the Arm Home and Arm Away buttons send native `forceArm`. Arm Night sends Stay with silent exit and no entry delay, using `night_arm_variant`.
 
 ## Manual check
 
@@ -90,7 +146,7 @@ With more than one Alula panel configured, add `entity_id` of that panel when yo
 
 ## pyalula
 
-The integration vendors its own copy of the Alula client at `custom_components/alula/pyalula` (version 0.2.1). Home Assistant does not install `pyalula` from PyPI.
+The integration vendors its own copy of the Alula client at `custom_components/alula/pyalula` (version 0.2.2). Home Assistant does not install `pyalula` from PyPI.
 
 The same client still lives at the repository root for local use:
 

@@ -6,7 +6,10 @@ force_arm:
     and marks open zones bypassed. The bypass method writes zoneBypass and then
     arms; on a Concord 4 that leaves the panel disarmed and the keypad stuck on
     the indirect-bypass prompt. Home Assistant state can lag the keypad by
-    30-90 seconds.
+    30-90 seconds. silent, no_entry_delay, and variant are optional and default
+    to the command above. armSilent and noEntryDelay are unverified on a
+    Concord 4. Concord 4 has no night level (level 3 is ignored); test silent
+    stay with mode home.
   fields:
     entity_id:
       name: Alarm panel
@@ -37,7 +40,7 @@ force_arm:
         native (the default) writes forceArm. bypass writes zoneBypass for each
         open zone and then arms. On a Concord 4, bypass does not bypass the
         zones: the panel stays disarmed and the keypad stays on the
-        indirect-bypass prompt.
+        indirect-bypass prompt. Ignored when variant is set.
       required: false
       default: native
       example: native
@@ -46,6 +49,46 @@ force_arm:
           options:
             - native
             - bypass
+    silent:
+      name: Silent exit
+      description: >
+        Set armSilent. On a Concord 4 this is meant to suppress exit beeps
+        (keypad 5, 2, code, 4). Unverified on a Concord 4. Default false
+        leaves an existing force_arm call unchanged. No PIN is sent.
+      required: false
+      default: false
+      selector:
+        boolean:
+    no_entry_delay:
+      name: No entry delay
+      description: >
+        Set noEntryDelay. On a Concord 4 this is the "NO DELAY" half of
+        armed-to-stay. Unverified on a Concord 4. Default false leaves an
+        existing force_arm call unchanged. No PIN is sent.
+      required: false
+      default: false
+      selector:
+        boolean:
+    variant:
+      name: Payload variant
+      description: >
+        Which no-PIN command to send. Omit it to keep the current method.
+        forcearm puts armSilent and noEntryDelay on the forceArm value
+        (unverified). arminglevel writes the existing armingLevel value with
+        those flags. partition sends partitionArmingLevelChange with authType
+        user and no PIN (ConnectFlex-proven, unverified on Concord 4).
+        forcearm_then_arminglevel sends forceArm, waits one second, then
+        writes armingLevel with the flags. For Concord 4 silent stay, use
+        mode home (level 2). Level 3 night is ignored on that panel.
+      required: false
+      example: forcearm
+      selector:
+        select:
+          options:
+            - forcearm
+            - arminglevel
+            - partition
+            - forcearm_then_arminglevel
 
 bypass_zone:
   name: Bypass zone
