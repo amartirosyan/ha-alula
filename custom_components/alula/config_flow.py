@@ -6,10 +6,22 @@ import logging
 from typing import Any
 
 import voluptuous as vol
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigFlow,
+    ConfigFlowResult,
+    OptionsFlowWithConfigEntry,
+)
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
+from homeassistant.core import callback
 
-from .const import CONF_PANEL_ID, DOMAIN
+from .const import (
+    CONF_NIGHT_ARM_VARIANT,
+    CONF_PANEL_ID,
+    DEFAULT_NIGHT_ARM_VARIANT,
+    DOMAIN,
+    FORCE_ARM_VARIANTS,
+)
 from .pyalula import AlulaClient
 from .pyalula.client import AlulaApiError, AlulaAuthError
 
@@ -24,10 +36,39 @@ STEP_USER_SCHEMA = vol.Schema(
 )
 
 
+class AlulaOptionsFlow(OptionsFlowWithConfigEntry):
+    """Choose the Arm Night payload. No PIN is stored here."""
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        if user_input is not None:
+            return self.async_create_entry(title="", data=user_input)
+        current = self.options.get(CONF_NIGHT_ARM_VARIANT, DEFAULT_NIGHT_ARM_VARIANT)
+        if current not in FORCE_ARM_VARIANTS:
+            current = DEFAULT_NIGHT_ARM_VARIANT
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_NIGHT_ARM_VARIANT, default=current): vol.In(
+                        FORCE_ARM_VARIANTS
+                    ),
+                }
+            ),
+        )
+
+
 class AlulaConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle the initial setup UI for Alula."""
 
     VERSION = 1
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry: ConfigEntry) -> AlulaOptionsFlow:
+        """Options for Arm Night. The flow does not ask for or store a PIN."""
+        return AlulaOptionsFlow(config_entry)
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None

@@ -29,6 +29,23 @@ ARM_LEVEL_STAY = 2
 ARM_LEVEL_NIGHT = 3
 ARM_LEVEL_AWAY = 4
 
+# No-PIN payload shapes exposed so a panel can be live-tested.
+# forcearm: armSilent and noEntryDelay inside the forceArm value (unverified;
+# no captured command shows those keys on forceArm).
+# arminglevel: the existing writeMfd armingLevel value, which already has them.
+# partition: partitionArmingLevelChange, authType user, no PIN. That shape is
+# proven on ConnectFlex and unverified on a Concord 4.
+# forcearm_then_arminglevel: the proven forceArm write, a short pause, then
+# armingLevel with the flags.
+ARM_VARIANTS = (
+    "forcearm",
+    "arminglevel",
+    "partition",
+    "forcearm_then_arminglevel",
+)
+# Arm Night uses this until a Concord 4 test shows which payload lands.
+DEFAULT_ARM_VARIANT = "forcearm"
+
 # String values returned by the REST API in the armingLevel field
 ARM_STATE_STRINGS = {
     "disarm": ARM_LEVEL_DISARM,

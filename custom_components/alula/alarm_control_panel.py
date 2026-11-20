@@ -16,7 +16,14 @@ from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DATA_CLIENT, DATA_COORDINATOR, DOMAIN
+from .const import (
+    CONF_NIGHT_ARM_VARIANT,
+    DATA_CLIENT,
+    DATA_COORDINATOR,
+    DEFAULT_NIGHT_ARM_VARIANT,
+    DOMAIN,
+    FORCE_ARM_VARIANTS,
+)
 from .coordinator import AlulaCoordinator
 from .identifiers import panel_unique_id
 from .pyalula import AlarmPanel, AlulaClient, ArmState
@@ -108,10 +115,29 @@ class AlulaAlarmPanel(CoordinatorEntity[AlulaCoordinator], AlarmControlPanelEnti
         await self._client.force_arm("home")
         await self.coordinator.async_request_refresh()
 
+    def _night_arm_variant(self) -> str:
+        """Payload shape for Arm Night. Default is forcearm until proven."""
+        options = getattr(self._entry, "options", None) or {}
+        chosen = options.get(CONF_NIGHT_ARM_VARIANT, DEFAULT_NIGHT_ARM_VARIANT)
+        if chosen in FORCE_ARM_VARIANTS:
+            return str(chosen)
+        return DEFAULT_NIGHT_ARM_VARIANT
+
     async def async_alarm_arm_night(self, code: str | None = None) -> None:
-        """Arm night with native forceArm. The code is not used or stored."""
+        """Concord 4 Arm Night: Stay, silent exit, no entry delay.
+
+        Concord 4 has no night level, so level 3 is not sent. The code
+        argument is ignored and is not stored. ``armSilent`` and
+        ``noEntryDelay`` are unverified on a Concord 4. The payload shape
+        comes from the integration option ``night_arm_variant``.
+        """
         del code
-        await self._client.force_arm("night")
+        await self._client.arm_with_variant(
+            "home",
+            self._night_arm_variant(),
+            silent=True,
+            no_entry_delay=True,
+        )
         await self.coordinator.async_request_refresh()
 
     async def async_alarm_arm_custom_bypass(self, code: str | None = None) -> None:

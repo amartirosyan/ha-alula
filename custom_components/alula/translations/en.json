@@ -25,10 +25,24 @@
       "already_configured": "This Alula account is already configured."
     }
   },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Alula options",
+        "description": "Concord 4 has no Night level. Arm Night sends Stay (level 2) with silent exit and no entry delay, and does not use a PIN. armSilent and noEntryDelay are unverified on a Concord 4. Pick the payload to send until a live test shows which one the panel accepts.",
+        "data": {
+          "night_arm_variant": "Arm Night payload"
+        },
+        "data_description": {
+          "night_arm_variant": "forcearm puts the flags on forceArm. arminglevel writes armingLevel with the flags. partition sends partitionArmingLevelChange with no PIN. forcearm_then_arminglevel sends forceArm, waits one second, then armingLevel with the flags."
+        }
+      }
+    }
+  },
   "services": {
     "force_arm": {
       "name": "Force arm",
-      "description": "Arm when zones are open, without a PIN. The default is native forceArm. On a Concord 4, bypass leaves the panel disarmed and the keypad on the indirect-bypass prompt. Home Assistant state can lag the keypad by 30-90 seconds.",
+      "description": "Arm when zones are open, without a PIN. The default is native forceArm. On a Concord 4, bypass leaves the panel disarmed and the keypad on the indirect-bypass prompt. silent, no_entry_delay, and variant are optional. armSilent and noEntryDelay are unverified on a Concord 4. Concord 4 ignores night level 3; use mode home for silent stay.",
       "fields": {
         "entity_id": {
           "name": "Alarm panel",
@@ -49,12 +63,34 @@
         },
         "method": {
           "name": "Method",
-          "description": "native (default) writes forceArm. bypass writes zoneBypass and then arms; that does not work on a Concord 4.",
+          "description": "native (default) writes forceArm. bypass writes zoneBypass and then arms; that does not work on a Concord 4. Ignored when variant is set.",
           "selector": {
             "select": {
               "options": {
                 "native": "Native force arm",
                 "bypass": "Bypass open zones (does not work on Concord 4)"
+              }
+            }
+          }
+        },
+        "silent": {
+          "name": "Silent exit",
+          "description": "Set armSilent. Meant to suppress Concord 4 exit beeps. Unverified on a Concord 4. Default false keeps the existing forceArm payload."
+        },
+        "no_entry_delay": {
+          "name": "No entry delay",
+          "description": "Set noEntryDelay. Meant to arm stay with no entry delay. Unverified on a Concord 4. Default false keeps the existing forceArm payload."
+        },
+        "variant": {
+          "name": "Payload variant",
+          "description": "Omit to keep the current method. forcearm puts the flags on forceArm. arminglevel writes armingLevel with the flags. partition sends partitionArmingLevelChange with authType user and no PIN. forcearm_then_arminglevel sends forceArm, waits, then armingLevel with the flags.",
+          "selector": {
+            "select": {
+              "options": {
+                "forcearm": "forceArm with flags",
+                "arminglevel": "armingLevel with flags",
+                "partition": "partitionArmingLevelChange, no PIN",
+                "forcearm_then_arminglevel": "forceArm, then armingLevel with flags"
               }
             }
           }
