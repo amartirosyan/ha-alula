@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.3
+
+Supervised live test on a Concord 4 with BAT-Connect, Nov 21 2026, two windows open. With the keypad on its BYPASS / CANCEL prompt, `forceArm` was ACKed but did not arm, and a repeated `armingLevel` write did not arm either. `zoneBypass` for each open zone, sent while the prompt was up, armed Stay (silent exit, no entry delay) 8 to 15 s later with nobody touching the keypad (7:48:37 AM and 9:42:24 AM PT). `zoneBypass` sent while disarmed, before the arm request, does not take. The keypad chirps briefly at the prompt; that can't be avoided.
+
+- New variant `arminglevel_then_zonebypass` (for `night_arm_variant` and `alula.force_arm`). It refreshes zone state, writes `armingLevel` with the flags, waits for the panel ACK/NAK (at least 3 s, at most 6 s), then sends `zoneBypass` for every zone open at that moment. Recommended Night setting.
+- Fire and life-safety zones are never auto-bypassed: Alula smoke/CO types, raw zone types naming smoke, CO, gas, heat, water/flood/moisture, fire, panic or 24-hour, and any zone whose Home Assistant device class is smoke, carbon_monoxide, gas, moisture, heat or safety.
+- `arminglevel_then_forcearm` and `arminglevel_then_rearm` are kept for diagnosis; neither armed a Concord 4.
+- `zoneBypass` writes and disarm (`changeArmingLevelUsingCode`) now log the command and the panel ACK or NAK at INFO. The PIN is masked.
+- Disarm without a code, or a failed disarm command, now raises an error in Home Assistant instead of failing silently.
+- No PIN is sent or stored for arming.
+
 ## 0.2.2
 
 Concord 4 has no Night arming level. Level 3 is ignored. Arm Night now sends Stay (arming level 2) with `armSilent` and `noEntryDelay`, and does not send or store a PIN. Home Assistant reports that as `armed_home`. The keypad text for success is `ARMED TO STAY NO DELAY`, with no exit beeps.
