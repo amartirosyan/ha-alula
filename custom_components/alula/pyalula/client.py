@@ -22,6 +22,7 @@ from .const import (
     ARM_LEVEL_NIGHT,
     ARM_LEVEL_STAY,
     ARM_VARIANTS,
+    PROTEST_ANSWER_VARIANTS,
     BASE_URL,
     OAUTH_CLIENT_ID,
     OAUTH_CLIENT_SECRET,
@@ -49,10 +50,25 @@ BYPASS_BEFORE_ARM_DELAY = 1.0
 # carries armSilent and noEntryDelay. Short enough to still be inside the
 # exit window on a Concord 4.
 FORCEARM_THEN_LEVEL_DELAY = 1.0
+# arminglevel_then_*: wait this long after the armingLevel write, so the panel
+# is in its arming protest (keypad BYPASS / CANCEL prompt), before answering.
+PROTEST_ANSWER_DELAY = 3.0
+# Longest wait for the panel's ACK/NAK to the armingLevel write before the
+# protest is answered anyway. A Concord 4 NAK arrives about 3.5 s after.
+PROTEST_REPLY_TIMEOUT = 6.0
+# Pause after the reply so the keypad BYPASS prompt is up before bypassing.
+PROTEST_SETTLE_DELAY = 1.0
 
 # Life-safety zones are never auto-bypassed by force arm. An explicit
 # set_zone_bypass() call can still target them.
 _NO_AUTO_BYPASS: frozenset[ZoneType] = frozenset({ZoneType.SMOKE, ZoneType.CO})
+# Raw Alula device type / zone type words that mean fire or life safety.
+# A zone whose raw config mentions one of these is never auto-bypassed.
+_LIFE_SAFETY_WORDS: tuple[str, ...] = (
+    "SMOKE", "CO", "CARBON", "GAS", "HEAT", "FIRE", "FREEZE", "TEMP",
+    "WATER", "FLOOD", "LEAK", "MOISTURE", "PANIC", "MEDICAL", "EMERG",
+    "SAFETY", "24H", "24HR",
+)
 
 _SECRET_LOG_KEYS = frozenset({
     "pin",
@@ -77,6 +93,23 @@ def _redact(value: Any) -> Any:
     if isinstance(value, list):
         return [_redact(item) for item in value]
     return value
+
+
+def _is_life_safety_raw(zone: Zone) -> bool:
+    """True if the zone's raw Alula config names a fire/life-safety type."""
+    raw = getattr(zone, "raw", None) or {}
+    words: list[str] = []
+    for key in ("deviceType", "zoneType", "type", "zoneFunction", "group"):
+        value = raw.get(key) if isinstance(raw, dict) else None
+        if isinstance(value, str):
+            words.append(value.upper())
+    for word in words:
+        for token in _LIFE_SAFETY_WORDS:
+            if word == token or word.startswith(token + "_") or token in word.split("_"):
+                return True
+            if len(token) > 3 and token in word:
+                return True
+    return False
 
 
 def _parse_device_type(device_type: str) -> ZoneType:
@@ -210,6 +243,9 @@ class AlulaClient:
         # Request ids of arm commands waiting for a panel ack or NAK.
         # Each entry is the envelope id plus the inner requestId.
         self._arm_inflight: list[set[str]] = []
+        # Set when the panel answers an arm command; holds (cmdrsp, reasons).
+        self._arm_reply_event: asyncio.Event | None = None
+        self._arm_reply: tuple[str, str] | None = None
 
     @property
     def ws_connected(self) -> bool:
@@ -637,7 +673,8 @@ class AlulaClient:
             "requestId": str(uuid.uuid4()),
         }
         msg = {"channel": WS_CHANNEL, "id": str(uuid.uuid4()), "send": inner}
-        await self._ws_send(msg)
+        # Traced so the panel ACK/NAK is logged at INFO. _redact masks the PIN.
+        await self._ws_send(msg, arm_trace=True)
         _LOGGER.debug("Sent changeArmingLevelUsingCode (disarm) to panel %s", dev_id)
 
     async def _send_arming_level(
@@ -716,6 +753,7 @@ class AlulaClient:
         *,
         silent: bool = False,
         no_entry_delay: bool = False,
+        exclude_indexes: set[int] | frozenset[int] | None = None,
     ) -> None:
         """Send one no-PIN arm shape so the payload can be live-tested.
 
@@ -753,6 +791,17 @@ class AlulaClient:
                 device_id=device_id,
             )
             return
+        if kind in PROTEST_ANSWER_VARIANTS:
+            await self._arm_and_answer_protest(
+                mode,
+                PROTEST_ANSWER_VARIANTS[kind],
+                user_number=user_number,
+                device_id=device_id,
+                silent=silent,
+                no_entry_delay=no_entry_delay,
+                exclude_indexes=exclude_indexes,
+            )
+            return
         if kind == "partition":
             await self._send_partition_arm(
                 mode,
@@ -778,6 +827,128 @@ class AlulaClient:
             no_entry_delay=no_entry_delay,
             device_id=device_id,
         )
+
+    async def _arm_and_answer_protest(
+        self,
+        mode: str,
+        answer: str,
+        user_number: int = 0,
+        device_id: str | None = None,
+        *,
+        silent: bool = False,
+        no_entry_delay: bool = False,
+        exclude_indexes: set[int] | frozenset[int] | None = None,
+    ) -> list[int]:
+        """Arm with armingLevel, then answer the panel's open-zone protest.
+
+        On a Concord 4 with BAT-Connect, an arm with open zones is NAKed
+        ("Protest Open Zones") and the keypad shows BYPASS / CANCEL. The
+        panel ignores a zoneBypass sent while disarmed, but takes one sent
+        while that prompt is up (live test 2026-11-21: armed Stay 8-15 s
+        later with nobody at the keypad).
+
+        Flow: refresh zone state, send armingLevel with the flags, wait for
+        the panel ACK/NAK (at most ``PROTEST_REPLY_TIMEOUT``, at least
+        ``PROTEST_ANSWER_DELAY``), then answer for every zone that is open
+        right now:
+
+        * ``zonebypass``: zoneBypass for each open zone (proven answer).
+        * ``forcearm``: forceArm at the same level (did not arm in testing).
+        * ``rearm``: the same armingLevel write again (did not arm).
+
+        Fire and life-safety zones are never bypassed, nor any index in
+        ``exclude_indexes``. No PIN is sent. Returns the indexes answered.
+        """
+        self._arm_level(mode)  # validate before anything is sent
+        dev_id = device_id or self._panel_id
+        if not dev_id:
+            raise AlulaApiError("Panel ID unknown — call get_panel_status() first")
+        excluded = {int(i) for i in (exclude_indexes or ())}
+
+        try:
+            await self.fetch_zone_statuses(device_id=dev_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:  # noqa: BLE001 - best effort refresh
+            _LOGGER.warning(
+                "Zone refresh before arm failed (%s); using the last known zone state",
+                err,
+            )
+
+        loop = asyncio.get_running_loop()
+        event = asyncio.Event()
+        self._arm_reply_event = event
+        self._arm_reply = None
+        started = loop.time()
+        try:
+            await self.arm(
+                mode,
+                user_number=user_number,
+                silent=silent,
+                no_entry_delay=no_entry_delay,
+                device_id=dev_id,
+            )
+            try:
+                await asyncio.wait_for(event.wait(), PROTEST_REPLY_TIMEOUT)
+            except asyncio.TimeoutError:
+                _LOGGER.info(
+                    "No panel ACK/NAK for %s arm within %.0f s; answering anyway",
+                    mode,
+                    PROTEST_REPLY_TIMEOUT,
+                )
+        finally:
+            if self._arm_reply_event is event:
+                self._arm_reply_event = None
+        reply = self._arm_reply
+        if reply is not None:
+            _LOGGER.info(
+                "Panel replied %s to %s arm%s",
+                reply[0].upper(),
+                mode,
+                f" ({reply[1]})" if reply[1] else "",
+            )
+        remaining = PROTEST_ANSWER_DELAY - (loop.time() - started)
+        await asyncio.sleep(max(remaining, 0) + (PROTEST_SETTLE_DELAY if reply else 0))
+
+        # Fresh state: the cache is updated by panel pushes while we waited.
+        indexes = [
+            i for i in self.open_bypassable_zone_indexes() if i not in excluded
+        ]
+        if excluded:
+            _LOGGER.info("Never auto-bypassing zone index(es) %s", sorted(excluded))
+        if not indexes:
+            _LOGGER.info("No open bypassable zones; not answering a protest for %s", mode)
+            return []
+        _LOGGER.info(
+            "Answering arming protest for open zone(s) %s with %s", indexes, answer
+        )
+        if answer == "forcearm":
+            await self._send_force_arm(
+                mode,
+                user_number=user_number,
+                device_id=dev_id,
+                silent=False,
+                no_entry_delay=False,
+                include_flags=False,
+            )
+        elif answer == "rearm":
+            await self.arm(
+                mode,
+                user_number=user_number,
+                silent=silent,
+                no_entry_delay=no_entry_delay,
+                device_id=dev_id,
+            )
+        elif answer == "zonebypass":
+            for offset, index in enumerate(indexes):
+                if offset:
+                    await asyncio.sleep(BYPASS_WRITE_INTERVAL)
+                await self.set_zone_bypass(
+                    index, True, user_number=user_number, device_id=dev_id
+                )
+        else:
+            raise ValueError(f"Unknown protest answer {answer!r}")
+        return indexes
 
     async def _send_force_arm(
         self,
@@ -874,6 +1045,7 @@ class AlulaClient:
                 }],
             }],
             device_id,
+            arm_trace=True,
         )
         _LOGGER.debug("Sent %s for zone %d", name, zone_index)
 
@@ -945,7 +1117,7 @@ class AlulaClient:
         for zone in self._zones.values():
             if not zone.is_open:
                 continue
-            if zone.zone_type in _NO_AUTO_BYPASS:
+            if zone.zone_type in _NO_AUTO_BYPASS or _is_life_safety_raw(zone):
                 _LOGGER.warning(
                     "Not auto-bypassing %s zone %s (%s)",
                     zone.zone_type.value,
@@ -1059,6 +1231,9 @@ class AlulaClient:
                 return
         else:
             self._arm_inflight.pop(0)
+        self._arm_reply = (cmdrsp, reasons)
+        if self._arm_reply_event is not None:
+            self._arm_reply_event.set()
         redacted = _redact(msg)
         if reasons:
             _LOGGER.info(
