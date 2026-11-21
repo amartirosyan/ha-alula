@@ -12,6 +12,7 @@ from homeassistant.components.alarm_control_panel import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -27,6 +28,9 @@ from .const import (
 from .coordinator import AlulaCoordinator
 from .identifiers import panel_unique_id
 from .pyalula import AlarmPanel, AlulaClient, ArmState
+from .pyalula.client import AlulaApiError, AlulaAuthError
+from .pyalula.const import PROTEST_ANSWER_VARIANTS
+from .safety import life_safety_zone_indexes
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -99,8 +103,13 @@ class AlulaAlarmPanel(CoordinatorEntity[AlulaCoordinator], AlarmControlPanelEnti
     async def async_alarm_disarm(self, code: str | None = None) -> None:
         if not code:
             _LOGGER.error("Disarm requires a PIN code")
-            return
-        await self._client.disarm(pin=code)
+            raise ServiceValidationError("Disarm requires the alarm code")
+        _LOGGER.info("Alula disarm requested (code not logged)")
+        try:
+            await self._client.disarm(pin=code)
+        except (AlulaApiError, AlulaAuthError) as err:
+            _LOGGER.error("Alula disarm failed: %s", err)
+            raise HomeAssistantError(f"Alula disarm failed: {err}") from err
         await self.coordinator.async_request_refresh()
 
     async def async_alarm_arm_away(self, code: str | None = None) -> None:
@@ -132,11 +141,16 @@ class AlulaAlarmPanel(CoordinatorEntity[AlulaCoordinator], AlarmControlPanelEnti
         comes from the integration option ``night_arm_variant``.
         """
         del code
+        variant = self._night_arm_variant()
+        kwargs = {}
+        if variant in PROTEST_ANSWER_VARIANTS:
+            kwargs["exclude_indexes"] = life_safety_zone_indexes(self.hass)
         await self._client.arm_with_variant(
             "home",
-            self._night_arm_variant(),
+            variant,
             silent=True,
             no_entry_delay=True,
+            **kwargs,
         )
         await self.coordinator.async_request_refresh()
 
