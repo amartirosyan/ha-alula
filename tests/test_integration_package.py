@@ -32,7 +32,7 @@ def test_vendored_client_matches_library() -> None:
 def test_manifest_drops_pypi_client() -> None:
     manifest = json.loads((COMPONENT / "manifest.json").read_text())
     assert manifest["domain"] == "alula"
-    assert manifest["version"] == "0.2.2"
+    assert manifest["version"] == "0.2.3"
     assert manifest["version"] == pyalula.__version__
     assert manifest["config_flow"] is True
     assert manifest["requirements"] == []
@@ -68,6 +68,9 @@ def test_service_descriptions_and_translations() -> None:
         "arminglevel",
         "partition",
         "forcearm_then_arminglevel",
+        "arminglevel_then_forcearm",
+        "arminglevel_then_rearm",
+        "arminglevel_then_zonebypass",
     }
     assert strings["options"]["step"]["init"]["data"]["night_arm_variant"]
     assert set(force["fields"]["mode"]["selector"]["select"]["options"]) == {
