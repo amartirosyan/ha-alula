@@ -67,6 +67,9 @@ class _Coordinator:
     async def async_request_refresh(self) -> None:
         self.refreshed += 1
 
+    def async_burst_refresh(self) -> None:
+        self.refreshed += 1
+
 
 def _call(hass: HomeAssistant, service: str, data: dict) -> ServiceCall:
     """Build a service call on HA 2024.11 and on later cores.
@@ -228,6 +231,7 @@ async def test_panel_buttons_use_native_force_arm() -> None:
         last_update_success=True,
         data=None,
         async_request_refresh=_refresh,
+        async_burst_refresh=lambda: None,
     )
     entity = AlulaAlarmPanel(coordinator, client, object())
     await entity.async_alarm_arm_home("1234")

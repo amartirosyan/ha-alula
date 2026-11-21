@@ -10,6 +10,7 @@ Supervised live test on a Concord 4 with BAT-Connect, Nov 21 2026, two windows o
 - `zoneBypass` writes and disarm (`changeArmingLevelUsingCode`) now log the command and the panel ACK or NAK at INFO. The PIN is masked.
 - Disarm without a code, or a failed disarm command, now raises an error in Home Assistant instead of failing silently.
 - No PIN is sent or stored for arming.
+- Faster state in Home Assistant: after any arm, disarm, force arm or zone bypass, the integration refreshes at about 3, 8, 15 and 25 s instead of waiting for the 30 s poll, and stops as soon as the arm state changes. A new command restarts the burst; refreshes never overlap (at most four extra calls per command).
 
 ## 0.2.2
 
