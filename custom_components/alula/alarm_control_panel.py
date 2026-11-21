@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import time
+from typing import Any
 
 from homeassistant.components.alarm_control_panel import (
     AlarmControlPanelEntity,
@@ -41,6 +43,8 @@ _STATE_MAP: dict[ArmState, AlarmControlPanelState] = {
     ArmState.ARMED_HOME: AlarmControlPanelState.ARMED_HOME,
     ArmState.ARMED_NIGHT: AlarmControlPanelState.ARMED_NIGHT,
     ArmState.TRIGGERED: AlarmControlPanelState.TRIGGERED,
+    ArmState.ARMING: AlarmControlPanelState.ARMING,
+    ArmState.PENDING: AlarmControlPanelState.PENDING,
 }
 
 
@@ -99,6 +103,19 @@ class AlulaAlarmPanel(CoordinatorEntity[AlulaCoordinator], AlarmControlPanelEnti
         if self.coordinator.data is None:
             return None
         return _STATE_MAP.get(self.coordinator.data.arm_state)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Exit/entry delay seconds left (as of last_updated) and the target mode."""
+        panel: AlarmPanel | None = self.coordinator.data
+        if panel is None:
+            return {}
+        now = time.time()
+        return {
+            "exit_delay_remaining": panel.exit_delay_remaining(now),
+            "entry_delay_remaining": panel.entry_delay_remaining(now),
+            "arming_to": panel.arming_to,
+        }
 
     async def async_alarm_disarm(self, code: str | None = None) -> None:
         if not code:

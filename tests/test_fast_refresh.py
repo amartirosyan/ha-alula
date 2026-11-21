@@ -7,6 +7,7 @@ import importlib.util
 from pathlib import Path
 
 import pytest
+from unittest.mock import AsyncMock
 
 _PATH = Path(__file__).resolve().parents[1] / "custom_components" / "alula" / "fast_refresh.py"
 _spec = importlib.util.spec_from_file_location("alula_fast_refresh", _PATH)
@@ -95,3 +96,65 @@ async def test_refresh_errors_do_not_stop_the_burst() -> None:
 
     r = FastRefresher(refresh, lambda: "s", delays=(1, 6), sleep=clock.sleep)
     assert await r.trigger() == 2
+
+
+# ---- DelayPoller ----------------------------------------------------------
+
+DelayPoller = fast_refresh.DelayPoller
+
+
+class _WallClock(_Clock):
+    def __call__(self) -> float:
+        return self.now
+
+
+@pytest.mark.asyncio
+async def test_delay_poll_every_5s_with_final_check_and_stops_on_end() -> None:
+    clock = _WallClock()
+    info = {"v": (0.0, 12.0)}
+    times: list[float] = []
+
+    async def refresh() -> None:
+        times.append(clock.now)
+        if clock.now >= 12.0:
+            info["v"] = None  # panel reports the delay over
+
+    p = DelayPoller(refresh, lambda: info["v"], sleep=clock.sleep, clock=clock)
+    assert await p.ensure() == 3
+    assert times == [5.0, 10.0, 12.5]
+
+
+@pytest.mark.asyncio
+async def test_delay_poll_gives_up_after_timer_plus_grace() -> None:
+    clock = _WallClock()
+    times: list[float] = []
+
+    async def refresh() -> None:
+        times.append(clock.now)
+
+    # Delay flag never clears (stale status): stop at timer + 15 s.
+    p = DelayPoller(refresh, lambda: (0.0, 10.0), sleep=clock.sleep, clock=clock)
+    polls = await p.ensure()
+    assert times[-1] <= 25.0 + 1e-9
+    assert 10.5 in times
+    assert polls == len(times) and polls <= 8
+    assert p.ensure() is None  # past the deadline: no new task
+
+
+@pytest.mark.asyncio
+async def test_delay_poll_not_started_without_delay_and_single_task() -> None:
+    clock = _WallClock()
+    p = DelayPoller(AsyncMock(), lambda: None, sleep=clock.sleep, clock=clock)
+    assert p.ensure() is None
+    gate = asyncio.Event()
+
+    async def slow_sleep(_: float) -> None:
+        await gate.wait()
+
+    q = DelayPoller(AsyncMock(), lambda: (0.0, 60.0), sleep=slow_sleep, clock=clock)
+    t1 = q.ensure()
+    t2 = q.ensure()
+    assert t1 is t2 and q.running
+    q.cancel()
+    await asyncio.sleep(0)
+    assert not q.running

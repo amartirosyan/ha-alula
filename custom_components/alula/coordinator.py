@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import timedelta
 
 import asyncio
@@ -11,11 +12,14 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import DEFAULT_SCAN_INTERVAL, DOMAIN
-from .fast_refresh import FastRefresher
+from .fast_refresh import DelayPoller, FastRefresher
 from .pyalula import AlarmPanel, AlulaClient
 from .pyalula.client import AlulaApiError, AlulaAuthError
 
 _LOGGER = logging.getLogger(__name__)
+
+# Seconds to wait for the panelStatus reply during a delay refresh.
+DELAY_STATUS_WAIT = 1.5
 
 
 class AlulaCoordinator(DataUpdateCoordinator[AlarmPanel]):
@@ -41,6 +45,42 @@ class AlulaCoordinator(DataUpdateCoordinator[AlarmPanel]):
         # quick follow-up refresh must not overlap on the WebSocket.
         self._update_lock = asyncio.Lock()
         self._fast = FastRefresher(self.async_refresh, self._arm_state)
+        # While an exit/entry delay runs, poll panelStatus + REST every ~5 s
+        # (the panel does not push when the delay ends).
+        self._client.on_panel_status = self._on_panel_status
+        self._delay = DelayPoller(self._async_delay_refresh, self._delay_info)
+
+    def _delay_info(self) -> tuple[float, float] | None:
+        status = self._client.panel_status
+        if status is None or not status.in_delay or status.delay_timer <= 0:
+            return None
+        return (status.started_at, float(status.delay_timer))
+
+    @callback
+    def async_update_listeners(self) -> None:
+        super().async_update_listeners()
+        self._delay.ensure()
+
+    @callback
+    def _on_panel_status(self) -> None:
+        """New panelStatus version pushed: re-derive state now, then refresh."""
+        data = self.data
+        if data is not None:
+            data.apply_status(self._client.panel_status, time.time())
+            self.async_set_updated_data(data)
+        self.hass.async_create_task(self.async_request_refresh())
+
+    async def _async_delay_refresh(self) -> None:
+        """Light refresh during a delay: panelStatus + REST, zones kept."""
+        async with self._update_lock:
+            try:
+                await self._client.request_panel_status()
+                await asyncio.sleep(DELAY_STATUS_WAIT)
+                panel = await self._client.get_panel_status(panel_id=self._panel_id)
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Alula delay refresh failed: %s", err)
+                return
+        self.async_set_updated_data(panel)
 
     def _arm_state(self):
         data = self.data
@@ -53,6 +93,7 @@ class AlulaCoordinator(DataUpdateCoordinator[AlarmPanel]):
 
     async def async_shutdown(self) -> None:
         self._fast.cancel()
+        self._delay.cancel()
         await super().async_shutdown()
 
     def _on_arm_state_change(self) -> None:
@@ -73,9 +114,14 @@ class AlulaCoordinator(DataUpdateCoordinator[AlarmPanel]):
             if not self._client.ws_connected:
                 await self._client.connect_ws()
 
+            # Ask for panelStatus (exit/entry delay); the reply lands while
+            # the zone read below waits for its responses.
+            await self._client.request_panel_status(device_id=panel.id)
+
             # Refresh zone state via WebSocket
             zones = await self._client.fetch_zone_statuses(device_id=panel.id)
             panel.zones = zones
+            panel.apply_status(self._client.panel_status, time.time())
 
             return panel
 
