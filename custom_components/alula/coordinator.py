@@ -5,10 +5,13 @@ from __future__ import annotations
 import logging
 from datetime import timedelta
 
-from homeassistant.core import HomeAssistant
+import asyncio
+
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import DEFAULT_SCAN_INTERVAL, DOMAIN
+from .fast_refresh import FastRefresher
 from .pyalula import AlarmPanel, AlulaClient
 from .pyalula.client import AlulaApiError, AlulaAuthError
 
@@ -34,6 +37,23 @@ class AlulaCoordinator(DataUpdateCoordinator[AlarmPanel]):
         self._client = client
         self._panel_id = panel_id
         self._client.on_arm_state_change = self._on_arm_state_change
+        # One update at a time: the normal poll, a requested refresh and a
+        # quick follow-up refresh must not overlap on the WebSocket.
+        self._update_lock = asyncio.Lock()
+        self._fast = FastRefresher(self.async_refresh, self._arm_state)
+
+    def _arm_state(self):
+        data = self.data
+        return getattr(data, "arm_state", None) if data is not None else None
+
+    @callback
+    def async_burst_refresh(self) -> None:
+        """Refresh a few times soon after a command (debounced)."""
+        self._fast.trigger()
+
+    async def async_shutdown(self) -> None:
+        self._fast.cancel()
+        await super().async_shutdown()
 
     def _on_arm_state_change(self) -> None:
         """Called by the client when a keypad push indicates an arm state transition."""
@@ -41,6 +61,10 @@ class AlulaCoordinator(DataUpdateCoordinator[AlarmPanel]):
 
     async def _async_update_data(self) -> AlarmPanel:
         """Fetch fresh panel + zone data."""
+        async with self._update_lock:
+            return await self._async_fetch()
+
+    async def _async_fetch(self) -> AlarmPanel:
         try:
             # Poll arm state via REST (also caches panel ID needed for WS)
             panel = await self._client.get_panel_status(panel_id=self._panel_id)

@@ -110,19 +110,19 @@ class AlulaAlarmPanel(CoordinatorEntity[AlulaCoordinator], AlarmControlPanelEnti
         except (AlulaApiError, AlulaAuthError) as err:
             _LOGGER.error("Alula disarm failed: %s", err)
             raise HomeAssistantError(f"Alula disarm failed: {err}") from err
-        await self.coordinator.async_request_refresh()
+        self.coordinator.async_burst_refresh()
 
     async def async_alarm_arm_away(self, code: str | None = None) -> None:
         """Arm away with native forceArm. The code is not used or stored."""
         del code
         await self._client.force_arm("away")
-        await self.coordinator.async_request_refresh()
+        self.coordinator.async_burst_refresh()
 
     async def async_alarm_arm_home(self, code: str | None = None) -> None:
         """Arm home with native forceArm. The code is not used or stored."""
         del code
         await self._client.force_arm("home")
-        await self.coordinator.async_request_refresh()
+        self.coordinator.async_burst_refresh()
 
     def _night_arm_variant(self) -> str:
         """Payload shape for Arm Night. Default is forcearm until proven."""
@@ -152,10 +152,10 @@ class AlulaAlarmPanel(CoordinatorEntity[AlulaCoordinator], AlarmControlPanelEnti
             no_entry_delay=True,
             **kwargs,
         )
-        await self.coordinator.async_request_refresh()
+        self.coordinator.async_burst_refresh()
 
     async def async_alarm_arm_custom_bypass(self, code: str | None = None) -> None:
         """Arm home with native forceArm. The code is not used or stored."""
         del code
         await self._client.force_arm("home")
-        await self.coordinator.async_request_refresh()
+        self.coordinator.async_burst_refresh()

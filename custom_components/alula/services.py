@@ -134,7 +134,7 @@ async def async_handle_force_arm(hass: HomeAssistant, call: ServiceCall) -> None
             )
     finally:
         for coordinator in refreshed:
-            await coordinator.async_request_refresh()
+            coordinator.async_burst_refresh()
 
 
 async def async_handle_bypass_zone(hass: HomeAssistant, call: ServiceCall) -> None:
@@ -156,7 +156,7 @@ async def async_handle_bypass_zone(hass: HomeAssistant, call: ServiceCall) -> No
             await _invoke(client.set_zone_bypass(index, bypass))
     finally:
         for coordinator in refreshed:
-            await coordinator.async_request_refresh()
+            coordinator.async_burst_refresh()
 
 
 def _entity_ids(call: ServiceCall) -> list[str]:
