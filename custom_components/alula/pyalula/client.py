@@ -38,7 +38,7 @@ from .const import (
 )
 
 PATH_SELF = "/rest/v1/self"
-from .models import AlarmPanel, Zone, ZoneType
+from .models import AlarmPanel, PanelStatus, Zone, ZoneType
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -77,16 +77,36 @@ _SECRET_LOG_KEYS = frozenset({
     "refresh_token",
     "client_secret",
     "authorization",
+    "keypadkeycodes",
+    "userpin",
+    "duresspin",
 })
+# Named helix objects whose whole body is a code list (sendMfd payloads).
+_SECRET_PAYLOAD_NAMES = frozenset({"userpin", "duresspin"})
+_REDACTED = "***"
+
+
+def _is_secret_key(key: Any, item: Any) -> bool:
+    lowered = str(key).lower()
+    if lowered in _SECRET_LOG_KEYS:
+        return True
+    # Any list-valued *pin* / *code* field is treated as a code (e.g. digit arrays).
+    return isinstance(item, list) and ("pin" in lowered or "code" in lowered)
 
 
 def _redact(value: Any) -> Any:
     """Return a copy safe to log. Never log a PIN, password, or token."""
     if isinstance(value, dict):
+        name = value.get("name")
+        secret_body = isinstance(name, str) and (
+            name.lower() in _SECRET_PAYLOAD_NAMES or "pin" in name.lower()
+        )
         redacted: dict[Any, Any] = {}
         for key, item in value.items():
-            if str(key).lower() in _SECRET_LOG_KEYS:
-                redacted[key] = "***"
+            if _is_secret_key(key, item):
+                redacted[key] = _REDACTED
+            elif secret_body and key in ("items", "value"):
+                redacted[key] = _REDACTED
             else:
                 redacted[key] = _redact(item)
         return redacted
@@ -240,6 +260,11 @@ class AlulaClient:
         # Optional callback fired when keypad indicates an arm state transition
         self.on_arm_state_change: callable | None = None
 
+        # Latest helix panelStatus (exit/entry delay); see PanelStatus.
+        self._panel_status: PanelStatus | None = None
+        # Optional callback fired when a new panelStatus version arrives.
+        self.on_panel_status: callable | None = None
+
         # Request ids of arm commands waiting for a panel ack or NAK.
         # Each entry is the envelope id plus the inner requestId.
         self._arm_inflight: list[set[str]] = []
@@ -367,7 +392,30 @@ class AlulaClient:
         self._panel_id = str(panel_data["id"])
         zones = list(self._zones.values())
         panel = AlarmPanel.from_api(panel_data, zones=zones)
+        panel.apply_status(self._panel_status, time.time())
         return panel
+
+    @property
+    def panel_status(self) -> PanelStatus | None:
+        """Last panelStatus seen on device.helix (None until one arrives)."""
+        return self._panel_status
+
+    async def request_panel_status(self, device_id: str | None = None) -> None:
+        """Ask the panel for ``panelStatus``; the reply arrives as sendMfd."""
+        dev_id = device_id or self._panel_id
+        if not dev_id:
+            raise AlulaApiError("Panel ID unknown — call get_panel_status() first")
+        await self._ensure_ws()
+        await self._ws_send({
+            "channel": WS_CHANNEL,
+            "id": str(uuid.uuid4()),
+            "send": {
+                "cmdrsp": "requestMfd",
+                "deviceId": dev_id,
+                "payload": [{"name": "panelStatus"}],
+                "requestId": str(uuid.uuid4()),
+            },
+        })
 
     # ------------------------------------------------------------------
     # WebSocket: connect + receive loop
@@ -425,6 +473,7 @@ class AlulaClient:
                 "payload": [
                     {"name": "panelDefinition"},
                     {"name": "highestUsedIndexes"},
+                    {"name": "panelStatus"},
                 ],
                 "requestId": str(uuid.uuid4()),
             },
@@ -553,6 +602,9 @@ class AlulaClient:
                 self._highest_zone_index = int(zone_idx)
                 _LOGGER.debug("Highest used zone index=%d", self._highest_zone_index)
 
+        elif name == "panelStatus":
+            self._ingest_panel_status(item)
+
         elif name in ("zoneUpdate", "zoneFault", "zoneRestore"):
             # Single-zone push (legacy flat format)
             value = item.get("value", item)
@@ -562,6 +614,37 @@ class AlulaClient:
             except Exception:
                 pass
 
+    def _ingest_panel_status(self, item: dict, now: float | None = None) -> None:
+        """Cache a panelStatus object and notify on a new statusVersion.
+
+        A requestMfd reply re-sends the cached object; when its statusVersion
+        matches the one we hold, keep the original start time so a running
+        countdown is not reset.
+        """
+        status = PanelStatus.from_payload(item, time.time() if now is None else now)
+        if status is None:
+            return
+        prev = self._panel_status
+        same = (
+            prev is not None
+            and status.status_version is not None
+            and status.status_version == prev.status_version
+        )
+        if same:
+            status.received_at = prev.received_at
+            status.started_at = min(prev.started_at, status.started_at)
+        self._panel_status = status
+        _LOGGER.debug(
+            "panelStatus v%s: exit=%s entry=%s timer=%s level=%s",
+            status.status_version, status.in_exit_delay, status.in_entry_delay,
+            status.delay_timer, status.arming_level,
+        )
+        if not same and self.on_panel_status:
+            try:
+                self.on_panel_status()
+            except Exception as exc:  # never let a callback kill the WS loop
+                _LOGGER.debug("on_panel_status callback failed: %s", exc)
+
     def _update_arm_state_from_keypad(self, kp: dict) -> None:
         """Detect arm-state transitions from virtualKeypadOutput and request a REST refresh.
 
@@ -570,7 +653,7 @@ class AlulaClient:
         changing, or triggered indicators) and fire the callback so the HA
         coordinator triggers an immediate REST poll.
         """
-        _LOGGER.debug("virtualKeypadOutput payload: %s", kp)
+        _LOGGER.debug("virtualKeypadOutput payload: %s", _redact(kp))
         armed = kp.get("armed", False)
         fire = kp.get("fire", False)
         alarm_memory = kp.get("alarmMemory", False)
