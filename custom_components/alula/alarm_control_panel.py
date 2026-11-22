@@ -115,6 +115,8 @@ class AlulaAlarmPanel(CoordinatorEntity[AlulaCoordinator], AlarmControlPanelEnti
             "exit_delay_remaining": panel.exit_delay_remaining(now),
             "entry_delay_remaining": panel.entry_delay_remaining(now),
             "arming_to": panel.arming_to,
+            # "disarming" / "arming" while a command waits for the panel.
+            "command_in_progress": self.coordinator.command_in_progress,
         }
 
     async def async_alarm_disarm(self, code: str | None = None) -> None:
@@ -122,23 +124,38 @@ class AlulaAlarmPanel(CoordinatorEntity[AlulaCoordinator], AlarmControlPanelEnti
             _LOGGER.error("Disarm requires a PIN code")
             raise ServiceValidationError("Disarm requires the alarm code")
         _LOGGER.info("Alula disarm requested (code not logged)")
+        # Cleared by the panel ACK (state goes disarmed at once), a NAK
+        # (state kept) or a 20 s timeout.
+        self.coordinator.async_begin_command("disarming")
         try:
             await self._client.disarm(pin=code)
         except (AlulaApiError, AlulaAuthError) as err:
+            self.coordinator.async_end_command("disarming")
             _LOGGER.error("Alula disarm failed: %s", err)
             raise HomeAssistantError(f"Alula disarm failed: {err}") from err
+        except Exception:
+            self.coordinator.async_end_command("disarming")
+            raise
         self.coordinator.async_burst_refresh()
+
+    async def _arming(self, send) -> None:
+        """Run an arm command with command_in_progress 'arming' around it."""
+        self.coordinator.async_begin_command("arming")
+        try:
+            await send()
+        finally:
+            self.coordinator.async_end_command("arming")
 
     async def async_alarm_arm_away(self, code: str | None = None) -> None:
         """Arm away with native forceArm. The code is not used or stored."""
         del code
-        await self._client.force_arm("away")
+        await self._arming(lambda: self._client.force_arm("away"))
         self.coordinator.async_burst_refresh()
 
     async def async_alarm_arm_home(self, code: str | None = None) -> None:
         """Arm home with native forceArm. The code is not used or stored."""
         del code
-        await self._client.force_arm("home")
+        await self._arming(lambda: self._client.force_arm("home"))
         self.coordinator.async_burst_refresh()
 
     def _night_arm_variant(self) -> str:
@@ -162,17 +179,19 @@ class AlulaAlarmPanel(CoordinatorEntity[AlulaCoordinator], AlarmControlPanelEnti
         kwargs = {}
         if variant in PROTEST_ANSWER_VARIANTS:
             kwargs["exclude_indexes"] = life_safety_zone_indexes(self.hass)
-        await self._client.arm_with_variant(
-            "home",
-            variant,
-            silent=True,
-            no_entry_delay=True,
-            **kwargs,
+        await self._arming(
+            lambda: self._client.arm_with_variant(
+                "home",
+                variant,
+                silent=True,
+                no_entry_delay=True,
+                **kwargs,
+            )
         )
         self.coordinator.async_burst_refresh()
 
     async def async_alarm_arm_custom_bypass(self, code: str | None = None) -> None:
         """Arm home with native forceArm. The code is not used or stored."""
         del code
-        await self._client.force_arm("home")
+        await self._arming(lambda: self._client.force_arm("home"))
         self.coordinator.async_burst_refresh()

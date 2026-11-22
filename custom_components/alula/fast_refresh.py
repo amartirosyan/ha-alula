@@ -176,3 +176,91 @@ class DelayPoller:
         if info is None:
             _LOGGER.debug("Alula delay ended after %d poll(s)", polls)
         return polls
+
+
+# After the panel ACKs a disarm, show disarmed at once and hold it this long
+# while REST catches up (REST can lag the panel by several seconds). A REST
+# read that agrees, a newer panelStatus, or the end of the hold releases it;
+# from then on REST wins.
+OPTIMISTIC_HOLD: float = 15.0
+# Longest a command may show as in progress without an ACK or NAK.
+COMMAND_TIMEOUT: float = 20.0
+
+
+class OptimisticHold:
+    """Hold an optimistic state until REST agrees or the hold expires."""
+
+    def __init__(
+        self,
+        hold: float = OPTIMISTIC_HOLD,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._hold = hold
+        self._clock = clock
+        self._state: Any = None
+        self._marker: Any = None
+        self._until = 0.0
+
+    @property
+    def active(self) -> bool:
+        return self._state is not None and self._clock() < self._until
+
+    def set(self, state: Any, marker: Any = None) -> None:
+        """Hold ``state``. ``marker`` is the panelStatus version at the ACK."""
+        self._state = state
+        self._marker = marker
+        self._until = self._clock() + self._hold
+
+    def rebase(self, marker: Any) -> None:
+        """A newer panel status agrees with the held state: track it instead."""
+        if self._state is not None:
+            self._marker = marker
+
+    def clear(self) -> None:
+        self._state = None
+        self._marker = None
+        self._until = 0.0
+
+    def apply(self, actual: Any, marker: Any = None) -> Any:
+        """Return the state to show for a fresh ``actual`` reading."""
+        if self._state is None:
+            return actual
+        if actual == self._state:
+            self.clear()  # confirmed
+            return actual
+        if self._clock() >= self._until or marker != self._marker:
+            # Hold over, or the panel sent a newer status: the real state wins.
+            self.clear()
+            return actual
+        return self._state
+
+
+class CommandTracker:
+    """Which command (``disarming`` / ``arming``) is waiting for the panel."""
+
+    def __init__(
+        self,
+        timeout: float = COMMAND_TIMEOUT,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._timeout = timeout
+        self._clock = clock
+        self._kind: str | None = None
+        self._started = 0.0
+
+    def begin(self, kind: str) -> None:
+        self._kind = kind
+        self._started = self._clock()
+
+    def end(self, kind: str | None = None) -> bool:
+        """Clear the command (only if it is ``kind`` when given)."""
+        if self._kind is None or (kind is not None and self._kind != kind):
+            return False
+        self._kind = None
+        return True
+
+    @property
+    def current(self) -> str | None:
+        if self._kind is not None and self._clock() - self._started >= self._timeout:
+            self._kind = None
+        return self._kind
