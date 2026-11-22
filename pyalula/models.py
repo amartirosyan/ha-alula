@@ -182,6 +182,8 @@ class AlarmPanel:
     # REST armingLevel as parsed; arm_state may be ARMING/PENDING on top.
     rest_state: ArmState | None = None
     status: PanelStatus | None = None
+    # Wall clock of the REST read behind rest_state (0 = unknown).
+    rest_fetched_at: float = 0.0
 
     def apply_status(self, status: PanelStatus | None, now: float) -> ArmState:
         """Set arm_state from the REST state plus a running panel delay."""
@@ -189,7 +191,16 @@ class AlarmPanel:
         self.rest_state = base
         self.status = status
         state = base
-        if status is not None and status.remaining(now) > 0:
+        if (
+            status is not None
+            and status.arming_level == 1
+            and not status.in_delay
+            and self.rest_fetched_at
+            and status.received_at > self.rest_fetched_at
+        ):
+            # A panelStatus newer than the REST read says disarmed: REST lags.
+            state = ArmState.DISARMED
+        elif status is not None and status.remaining(now) > 0:
             if status.in_exit_delay and status.arming_to is not None:
                 state = ArmState.ARMING
             elif status.in_entry_delay and base not in (

@@ -271,6 +271,10 @@ class AlulaClient:
         # Set when the panel answers an arm command; holds (cmdrsp, reasons).
         self._arm_reply_event: asyncio.Event | None = None
         self._arm_reply: tuple[str, str] | None = None
+        # Request ids of disarm commands; their ACK/NAK fires on_disarm_reply.
+        self._disarm_ids: set[str] = set()
+        # Optional callback(cmdrsp, reasons) for a disarm ACK ("ack") or NAK ("nak").
+        self.on_disarm_reply: callable | None = None
 
     @property
     def ws_connected(self) -> bool:
@@ -392,6 +396,7 @@ class AlulaClient:
         self._panel_id = str(panel_data["id"])
         zones = list(self._zones.values())
         panel = AlarmPanel.from_api(panel_data, zones=zones)
+        panel.rest_fetched_at = time.time()
         panel.apply_status(self._panel_status, time.time())
         return panel
 
@@ -756,8 +761,16 @@ class AlulaClient:
             "requestId": str(uuid.uuid4()),
         }
         msg = {"channel": WS_CHANNEL, "id": str(uuid.uuid4()), "send": inner}
+        # Before the send: the ACK can arrive while send_json yields.
+        self._disarm_ids |= self._arm_ids(msg)
+        if len(self._disarm_ids) > 40:
+            self._disarm_ids = self._arm_ids(msg)
         # Traced so the panel ACK/NAK is logged at INFO. _redact masks the PIN.
-        await self._ws_send(msg, arm_trace=True)
+        try:
+            await self._ws_send(msg, arm_trace=True)
+        except Exception:
+            self._disarm_ids -= self._arm_ids(msg)
+            raise
         _LOGGER.debug("Sent changeArmingLevelUsingCode (disarm) to panel %s", dev_id)
 
     async def _send_arming_level(
@@ -1303,20 +1316,27 @@ class AlulaClient:
         request_id, cmdrsp, reasons = _panel_reply(msg)
         if cmdrsp not in ("ack", "nak"):
             return
+        matched: set[str] | None = None
         if request_id:
-            matched = False
             for group in self._arm_inflight:
                 if request_id in group:
                     self._arm_inflight.remove(group)
-                    matched = True
+                    matched = group
                     break
-            if not matched:
+            if matched is None:
                 return
         else:
-            self._arm_inflight.pop(0)
+            matched = self._arm_inflight.pop(0)
         self._arm_reply = (cmdrsp, reasons)
         if self._arm_reply_event is not None:
             self._arm_reply_event.set()
+        if matched & self._disarm_ids:
+            self._disarm_ids -= matched
+            if self.on_disarm_reply:
+                try:
+                    self.on_disarm_reply(cmdrsp, reasons)
+                except Exception as exc:  # never let a callback kill the WS loop
+                    _LOGGER.debug("on_disarm_reply callback failed: %s", exc)
         redacted = _redact(msg)
         if reasons:
             _LOGGER.info(
