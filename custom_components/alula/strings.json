@@ -34,7 +34,7 @@
           "night_arm_variant": "Arm Night payload"
         },
         "data_description": {
-          "night_arm_variant": "forcearm puts the flags on forceArm. arminglevel writes armingLevel with the flags. partition sends partitionArmingLevelChange with no PIN. forcearm_then_arminglevel sends forceArm, waits one second, then armingLevel with the flags."
+          "night_arm_variant": "forcearm puts the flags on forceArm. arminglevel writes armingLevel with the flags. partition sends partitionArmingLevelChange with no PIN. forcearm_then_arminglevel sends forceArm, waits one second, then armingLevel with the flags. The arminglevel_then_ variants write armingLevel with the flags, wait three seconds for the open-zone protest, then answer it with forceArm, a second armingLevel write, or zoneBypass for each open zone."
         }
       }
     }
@@ -83,14 +83,17 @@
         },
         "variant": {
           "name": "Payload variant",
-          "description": "Omit to keep the current method. forcearm puts the flags on forceArm. arminglevel writes armingLevel with the flags. partition sends partitionArmingLevelChange with authType user and no PIN. forcearm_then_arminglevel sends forceArm, waits, then armingLevel with the flags.",
+          "description": "Omit to keep the current method. forcearm puts the flags on forceArm. arminglevel writes armingLevel with the flags. partition sends partitionArmingLevelChange with authType user and no PIN. forcearm_then_arminglevel sends forceArm, waits, then armingLevel with the flags. The arminglevel_then_ variants write armingLevel with the flags, wait three seconds for the open-zone protest, then answer it with forceArm, a second armingLevel write, or zoneBypass for each open zone.",
           "selector": {
             "select": {
               "options": {
                 "forcearm": "forceArm with flags",
                 "arminglevel": "armingLevel with flags",
                 "partition": "partitionArmingLevelChange, no PIN",
-                "forcearm_then_arminglevel": "forceArm, then armingLevel with flags"
+                "forcearm_then_arminglevel": "forceArm, then armingLevel with flags",
+                "arminglevel_then_forcearm": "armingLevel with flags, then forceArm to answer the protest",
+                "arminglevel_then_rearm": "armingLevel with flags, sent twice to answer the protest",
+                "arminglevel_then_zonebypass": "armingLevel with flags, then zoneBypass for open zones (works on Concord 4)"
               }
             }
           }

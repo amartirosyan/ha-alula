@@ -80,6 +80,13 @@ force_arm:
         forcearm_then_arminglevel sends forceArm, waits one second, then
         writes armingLevel with the flags. For Concord 4 silent stay, use
         mode home (level 2). Level 3 night is ignored on that panel.
+        arminglevel_then_forcearm, arminglevel_then_rearm and
+        arminglevel_then_zonebypass write armingLevel with the flags, wait
+        three seconds for the Concord 4 open-zone protest (keypad BYPASS /
+        CANCEL prompt), then answer it with forceArm, the same armingLevel
+        write again, or zoneBypass for each open zone. Only
+        arminglevel_then_zonebypass armed a Concord 4 (Nov 21 2026 test).
+        Fire and life-safety zones are never bypassed.
       required: false
       example: forcearm
       selector:
@@ -89,6 +96,9 @@ force_arm:
             - arminglevel
             - partition
             - forcearm_then_arminglevel
+            - arminglevel_then_forcearm
+            - arminglevel_then_rearm
+            - arminglevel_then_zonebypass
 
 bypass_zone:
   name: Bypass zone

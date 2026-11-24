@@ -27,6 +27,8 @@ def client(monkeypatch: pytest.MonkeyPatch) -> AlulaClient:
     monkeypatch.setattr("pyalula.client.BYPASS_WRITE_INTERVAL", 0)
     monkeypatch.setattr("pyalula.client.BYPASS_BEFORE_ARM_DELAY", 0)
     monkeypatch.setattr("pyalula.client.FORCEARM_THEN_LEVEL_DELAY", 0)
+    monkeypatch.setattr("pyalula.client.PROTEST_REPLY_TIMEOUT", 0.01)
+    monkeypatch.setattr("pyalula.client.PROTEST_SETTLE_DELAY", 0)
     panel = AlulaClient()
     panel._panel_id = "panel-1"
     panel._user_id = "user-1"
@@ -410,3 +412,177 @@ async def test_ack_without_request_id_still_logs_while_arming(
     await client._handle_ws_message({"event": {"data": {"cmdrsp": "ACK"}}})
     assert "Alula panel ACK" in caplog.text
     assert client._arm_inflight == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("variant", "second"),
+    [
+        ("arminglevel_then_forcearm", ["forceArm"]),
+        ("arminglevel_then_rearm", ["armingLevel"]),
+        ("arminglevel_then_zonebypass", ["zoneBypass", "zoneBypass"]),
+    ],
+)
+async def test_protest_answer_variants(
+    client: AlulaClient, monkeypatch: pytest.MonkeyPatch, variant: str, second: list[str]
+) -> None:
+    monkeypatch.setattr("pyalula.client.PROTEST_ANSWER_DELAY", 0)
+    client._zones = {
+        8: Zone(id="8", name="GUEST BEDROOM WINDOW", zone_type=ZoneType.WINDOW, is_open=True),
+        12: Zone(id="12", name="BEDROOM 3 WINDOW", zone_type=ZoneType.WINDOW, is_open=True),
+        5: Zone(id="5", name="SMOKE", zone_type=ZoneType.SMOKE, is_open=True),
+        1: Zone(id="1", name="FRONT DOOR", zone_type=ZoneType.WINDOW, is_open=False),
+    }
+    await client.arm_with_variant("home", variant, silent=True, no_entry_delay=True)
+    msgs = _messages(client)
+    names = [m["send"]["payload"][0]["name"] for m in msgs]
+    assert names == ["armingLevel"] + second
+    first = msgs[0]["send"]["payload"][0]["value"]
+    assert first == {
+        "armingLevelValue": 2,
+        "userNumber": 0,
+        "armSilent": True,
+        "noEntryDelay": True,
+    }
+    if variant == "arminglevel_then_forcearm":
+        assert msgs[1]["send"]["payload"][0]["value"] == {"armingLevelValue": 2, "userNumber": 0}
+    if variant == "arminglevel_then_rearm":
+        assert msgs[1]["send"]["payload"][0]["value"] == first
+    if variant == "arminglevel_then_zonebypass":
+        assert [m["send"]["payload"][0]["indexFirst"] for m in msgs[1:]] == [8, 12]
+    for m in msgs:
+        assert "pin" not in _walk_keys(m)
+
+
+@pytest.mark.asyncio
+async def test_protest_answer_skipped_when_no_open_zones(
+    client: AlulaClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("pyalula.client.PROTEST_ANSWER_DELAY", 0)
+    client._zones = {}
+    await client.arm_with_variant("home", "arminglevel_then_forcearm", silent=True, no_entry_delay=True)
+    assert [m["send"]["payload"][0]["name"] for m in _messages(client)] == ["armingLevel"]
+
+
+def _windows_open(panel: AlulaClient) -> None:
+    panel._zones = {
+        8: Zone(id="8", name="GUEST BEDROOM WINDOW", zone_type=ZoneType.WINDOW, is_open=True),
+        12: Zone(id="12", name="BEDROOM 3WINDOW", zone_type=ZoneType.WINDOW, is_open=True),
+    }
+
+
+def _nak_frame(request_id: str) -> dict:
+    return {
+        "channel": "device.helix",
+        "event": {
+            "data": {
+                "cmdrsp": "nak",
+                "payload": {"nakReasons": [{"reason": "Protest Open Zones"}]},
+                "requestId": request_id,
+            }
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_zonebypass_answers_nak_with_open_zones(
+    client: AlulaClient, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Live-proven flow: armingLevel, protest NAK, then zoneBypass per open zone."""
+    monkeypatch.setattr("pyalula.client.PROTEST_ANSWER_DELAY", 0)
+    monkeypatch.setattr("pyalula.client.PROTEST_REPLY_TIMEOUT", 5)
+    _windows_open(client)
+    ws = client._ws
+    real_send = ws.send_json
+
+    async def send_and_nak(msg: dict) -> None:
+        await real_send(msg)
+        if msg["send"]["payload"][0]["name"] == "armingLevel":
+            client._log_arm_reply(_nak_frame(msg["send"]["requestId"]))
+
+    ws.send_json = send_and_nak
+    caplog.set_level(logging.INFO, logger="pyalula.client")
+    loop = __import__("asyncio").get_running_loop()
+    t0 = loop.time()
+    answered = await client.arm_with_variant(
+        "home", "arminglevel_then_zonebypass", silent=True, no_entry_delay=True
+    )
+    assert loop.time() - t0 < 2  # did not sit out the 5 s reply timeout
+    msgs = _messages(client)
+    assert [m["send"]["payload"][0]["name"] for m in msgs] == [
+        "armingLevel", "zoneBypass", "zoneBypass"
+    ]
+    assert [m["send"]["payload"][0]["indexFirst"] for m in msgs[1:]] == [8, 12]
+    assert "Protest Open Zones" in caplog.text
+    assert "NAK" in caplog.text
+    client.fetch_zone_statuses.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_zonebypass_uses_zone_state_after_the_wait(
+    client: AlulaClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A window that opens before the answer is bypassed; a closed one is not."""
+    monkeypatch.setattr("pyalula.client.PROTEST_ANSWER_DELAY", 0)
+    _windows_open(client)
+    real_arm = client.arm
+
+    async def arm_then_change(*args, **kwargs):
+        await real_arm(*args, **kwargs)
+        client._zones[8].is_open = False
+        client._zones[3] = Zone(id="3", name="KITCHEN DOOR", zone_type=ZoneType.DOOR, is_open=True)
+
+    client.arm = arm_then_change
+    await client.arm_with_variant("home", "arminglevel_then_zonebypass", silent=True, no_entry_delay=True)
+    msgs = _messages(client)
+    assert [m["send"]["payload"][0]["indexFirst"] for m in msgs[1:]] == [3, 12]
+
+
+@pytest.mark.asyncio
+async def test_zonebypass_never_bypasses_life_safety(
+    client: AlulaClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("pyalula.client.PROTEST_ANSWER_DELAY", 0)
+    _windows_open(client)
+    client._zones.update({
+        1: Zone(id="1", name="SMOKE", zone_type=ZoneType.SMOKE, is_open=True),
+        2: Zone(id="2", name="CO", zone_type=ZoneType.CO, is_open=True),
+        4: Zone(id="4", name="BASEMENT WATER", zone_type=ZoneType.OTHER, is_open=True,
+                raw={"deviceType": "WATER"}),
+        6: Zone(id="6", name="FURNACE HEAT", zone_type=ZoneType.OTHER, is_open=True,
+                raw={"deviceType": "HEAT_DET"}),
+        7: Zone(id="7", name="GAS", zone_type=ZoneType.OTHER, is_open=True),
+    })
+    # zone 7 is flagged by Home Assistant's device class (gas)
+    await client.arm_with_variant(
+        "home", "arminglevel_then_zonebypass", silent=True, no_entry_delay=True,
+        exclude_indexes={7},
+    )
+    msgs = _messages(client)
+    assert [m["send"]["payload"][0]["indexFirst"] for m in msgs[1:]] == [8, 12]
+
+
+@pytest.mark.asyncio
+async def test_zonebypass_with_nothing_open_only_arms(
+    client: AlulaClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("pyalula.client.PROTEST_ANSWER_DELAY", 0)
+    client._zones = {
+        8: Zone(id="8", name="GUEST BEDROOM WINDOW", zone_type=ZoneType.WINDOW, is_open=False),
+    }
+    await client.arm_with_variant("home", "arminglevel_then_zonebypass", silent=True, no_entry_delay=True)
+    assert [m["send"]["payload"][0]["name"] for m in _messages(client)] == ["armingLevel"]
+
+
+@pytest.mark.asyncio
+async def test_disarm_is_traced_and_pin_redacted(
+    client: AlulaClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger="pyalula.client")
+    await client.disarm("9876")
+    sent = _messages(client)[0]
+    assert sent["send"]["cmdrsp"] == "changeArmingLevelUsingCode"
+    assert sent["send"]["payload"]["armingLevelValue"] == 1
+    assert "Alula WS command" in caplog.text
+    assert "9876" not in caplog.text
+    assert "'9', '8'" not in caplog.text

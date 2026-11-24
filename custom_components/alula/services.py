@@ -34,6 +34,8 @@ from .const import (
 )
 from .coordinator import AlulaCoordinator
 from .identifiers import zone_index_from_unique_id
+from .pyalula.const import PROTEST_ANSWER_VARIANTS
+from .safety import life_safety_zone_indexes
 from .pyalula.client import AlulaApiError, AlulaAuthError, AlulaClient
 
 _LOGGER = logging.getLogger(__name__)
@@ -127,11 +129,12 @@ async def async_handle_force_arm(hass: HomeAssistant, call: ServiceCall) -> None
                     silent=silent,
                     no_entry_delay=no_entry_delay,
                     variant=variant,
+                    hass=hass,
                 )
             )
     finally:
         for coordinator in refreshed:
-            await coordinator.async_request_refresh()
+            coordinator.async_burst_refresh()
 
 
 async def async_handle_bypass_zone(hass: HomeAssistant, call: ServiceCall) -> None:
@@ -153,7 +156,7 @@ async def async_handle_bypass_zone(hass: HomeAssistant, call: ServiceCall) -> No
             await _invoke(client.set_zone_bypass(index, bypass))
     finally:
         for coordinator in refreshed:
-            await coordinator.async_request_refresh()
+            coordinator.async_burst_refresh()
 
 
 def _entity_ids(call: ServiceCall) -> list[str]:
@@ -273,6 +276,7 @@ async def _dispatch_force_arm(
     silent: bool = False,
     no_entry_delay: bool = False,
     variant: str | None = None,
+    hass: HomeAssistant | None = None,
 ) -> None:
     """Arm without a PIN.
 
@@ -282,11 +286,15 @@ async def _dispatch_force_arm(
     stays the payload that already armed a Concord 4.
     """
     if variant:
+        kwargs = {}
+        if variant in PROTEST_ANSWER_VARIANTS and hass is not None:
+            kwargs["exclude_indexes"] = life_safety_zone_indexes(hass)
         await client.arm_with_variant(
             mode,
             variant,
             silent=silent,
             no_entry_delay=no_entry_delay,
+            **kwargs,
         )
         return
     if method == "native":
